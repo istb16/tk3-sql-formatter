@@ -8,7 +8,8 @@ import { format } from 'sql-formatter';
 function collapseParenBlocks(sql) {
   let prev = '';
   let result = sql;
-  while (prev !== result) {
+  let limit = 100;
+  while (prev !== result && limit-- > 0) {
     prev = result;
     result = result.replace(
       /\((\n[\t ]+[^()\n]+)+\n[\t ]*\)/g,

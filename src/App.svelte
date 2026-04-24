@@ -28,6 +28,7 @@
   let outputSql       = $state('');
   let errorMsg        = $state('');
   let copyDone        = $state(false);
+  let copyTimer;
 
   // ── Derived ───────────────────────────────────────────────────────────────
   let t           = $derived(TRANSLATIONS[lang]);
@@ -105,13 +106,13 @@
     try {
       await navigator.clipboard.writeText(outputSql);
       copyDone = true;
-      setTimeout(() => (copyDone = false), 2000);
+      clearTimeout(copyTimer);
+      copyTimer = setTimeout(() => (copyDone = false), 2000);
     } catch {}
   }
 
   function loadSample() {
     inputSql = SAMPLE_SQL[dialect] ?? SAMPLE_SQL.mysql;
-    if (autoFormat) doFormat();
   }
 
   function clearAll() {

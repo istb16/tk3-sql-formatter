@@ -16,7 +16,6 @@
     "vite": "^8.0.10"
   },
   "dependencies": {
-    "firebase": "^12.12.1",
     "sql-formatter": "^15.7.3"
   }
 }
