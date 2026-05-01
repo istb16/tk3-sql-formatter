@@ -12,7 +12,7 @@ function collapseParenBlocks(sql) {
   while (prev !== result && limit-- > 0) {
     prev = result;
     result = result.replace(
-      /\((\n[\t ]+[^()\n]+)+\n[\t ]*\)/g,
+      /\((\n[ \t]+[^ \t()\n][^()\n]*)+\n[ \t]*\)/g,
       (match) => {
         const inner = match.slice(1, -1).split('\n').map(l => l.trim()).filter(Boolean);
         if (inner.some(l => /^SELECT\b/i.test(l))) return match;
