@@ -7,4 +7,7 @@ export default defineConfig({
     tailwindcss(),
     svelte(),
   ],
+  test: {
+    environment: 'jsdom',
+  },
 })
