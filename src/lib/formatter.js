@@ -1,22 +1,51 @@
 import { format } from 'sql-formatter';
 
 /**
- * Collapses multi-line (...) blocks that contain no nested parens and no
- * subqueries. Fixes EXTRACT(YEAR FROM date) being expanded by sql-formatter
- * because FROM is treated as a keyword. Runs until stable.
+ * Collapses multi-line (...) blocks onto one line.
+ * - Non-subquery blocks (EXTRACT etc.) are always collapsed.
+ * - SELECT subqueries are collapsed only when the full resulting line fits
+ *   within expressionWidth characters.
+ * - CTE blocks (WITH name AS (...)) are always left expanded.
+ * - Blocks where any inner line has unbalanced parens (nested unclosed block)
+ *   are left expanded.
+ * Runs until stable.
  */
-function collapseParenBlocks(sql) {
+function collapseParenBlocks(sql, expressionWidth) {
   let prev = '';
   let result = sql;
   let limit = 100;
   while (prev !== result && limit-- > 0) {
     prev = result;
     result = result.replace(
-      /\((\n[ \t]+[^ \t()\n][^()\n]*)+\n[ \t]*\)/g,
-      (match) => {
-        const inner = match.slice(1, -1).split('\n').map(l => l.trim()).filter(Boolean);
-        if (inner.some(l => /^SELECT\b/i.test(l))) return match;
-        return '(' + inner.join(' ') + ')';
+      /\((\n[ \t]+[^\n]+)+\n[ \t]*\)/g,
+      (match, _group, offset, input) => {
+        const lineStart = input.lastIndexOf('\n', offset) + 1;
+        const prefix = input.slice(lineStart, offset);
+        const inner = match.slice(1, match.lastIndexOf('\n'))
+          .split('\n').map(l => l.trim()).filter(Boolean);
+
+        // CTE: WITH name AS (  → always keep expanded
+        if (/\bAS\s*$/i.test(prefix.trimEnd())) return match;
+
+        // Reject if any inner line has unbalanced parens (nested unclosed block)
+        const hasUnclosedParen = inner.some(l => {
+          let depth = 0;
+          for (const ch of l) {
+            if (ch === '(') depth++;
+            else if (ch === ')') depth--;
+          }
+          return depth !== 0;
+        });
+        if (hasUnclosedParen) return match;
+
+        // Non-SELECT: always collapse (EXTRACT, function calls, etc.)
+        if (!inner.some(l => /^SELECT\b/i.test(l))) {
+          return '(' + inner.join(' ') + ')';
+        }
+
+        // SELECT subquery: collapse only if full line fits in expressionWidth
+        const fullLine = prefix + '(' + inner.join(' ') + ')';
+        return fullLine.length <= expressionWidth ? '(' + inner.join(' ') + ')' : match;
       }
     );
   }
@@ -81,7 +110,7 @@ export function formatSql(sql, opts) {
     expressionWidth: compactLists ? 9999 : fmtOpts.expressionWidth,
   });
   if (compactLists) {
-    result = collapseParenBlocks(result);
+    result = collapseParenBlocks(result, fmtOpts.expressionWidth ?? 50);
     result = joinCompactLists(result);
   }
   return result;

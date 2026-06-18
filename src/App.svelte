@@ -255,9 +255,9 @@
 
         <div class="mb-3">
           <label for="expr-width" class="text-xs text-slate-400 block mb-1">{t.exprWidth}: {expressionWidth}</label>
-          <input id="expr-width" type="range" min="20" max="120" step="5" bind:value={expressionWidth} class="w-full accent-blue-500" />
+          <input id="expr-width" type="range" min="50" max="200" step="5" bind:value={expressionWidth} class="w-full accent-blue-500" />
           <div class="flex justify-between text-xs text-slate-600 mt-0.5 select-none">
-            <span>20</span><span>70</span><span>120</span>
+            <span>50</span><span>125</span><span>200</span>
           </div>
         </div>
 

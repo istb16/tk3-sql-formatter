@@ -3,6 +3,7 @@ import { formatSql } from './formatter.js';
 
 const MYSQL = { language: 'mysql', compactLists: false };
 const COMPACT = { language: 'mysql', compactLists: true, keywordCase: 'upper' };
+const COMPACT_WIDE = { language: 'mysql', compactLists: true, keywordCase: 'upper', expressionWidth: 200 };
 
 describe('formatSql', () => {
   it('returns empty string for empty input', () => {
@@ -72,10 +73,27 @@ describe('formatSql', () => {
       expect(fromLine?.trim()).toBe('FROM t');
     });
 
-    it('does not collapse subquery SELECT inside parens', () => {
+    it('collapses short SELECT subquery when line fits in expressionWidth', () => {
       const result = formatSql(
-        'SELECT * FROM t WHERE id IN (SELECT id FROM other WHERE active = 1)',
+        'SELECT amount FROM sales WHERE amount = (SELECT MAX(amount) FROM sales)',
+        COMPACT_WIDE
+      );
+      const whereLine = result.split('\n').find(l => l.trim().startsWith('WHERE'));
+      expect(whereLine).toMatch(/WHERE.*\(SELECT.*FROM sales\)/i);
+    });
+
+    it('does not collapse SELECT subquery when line exceeds expressionWidth', () => {
+      const result = formatSql(
+        "SELECT * FROM t WHERE id IN (SELECT id FROM very_long_table_name WHERE status = 'active')",
         COMPACT
+      );
+      expect(result.split('\n').some(l => /^\s+SELECT\b/.test(l))).toBe(true);
+    });
+
+    it('does not collapse CTE subquery regardless of expressionWidth', () => {
+      const result = formatSql(
+        'WITH cte AS (SELECT id, name FROM users) SELECT * FROM cte',
+        COMPACT_WIDE
       );
       expect(result.split('\n').some(l => /^\s+SELECT\b/.test(l))).toBe(true);
     });
