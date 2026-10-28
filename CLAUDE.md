@@ -8,9 +8,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 npm run dev       # Start dev server (localhost:5173)
 npm run build     # Production build → dist/
 npm run preview   # Serve the dist/ build locally
+npm test          # Run Vitest once (jsdom environment)
+npm run test:watch  # Run Vitest in watch mode
 ```
 
-There are no tests or lint scripts.
+Tests live next to their modules as `src/lib/*.test.js`. CI (`.github/workflows/deploy.yaml`) runs `npm test` before building and deploying to Firebase Hosting. There is no lint script.
+
+Requires Node `^22.22.2 || ^24.15.0 || >=26` (see `engines` in `package.json`). `overrides` forces `@tailwindcss/node` onto the same `lightningcss` as Vite to avoid a duplicate native binary; remove it once Tailwind's pinned version catches up.
+
+Dependabot (`.github/dependabot.yml`) opens weekly update PRs for npm packages and GitHub Actions.
 
 ## Architecture
 
@@ -46,7 +52,7 @@ Five dialects are supported: `mysql`, `postgresql`, `snowflake`, `plsql` (Oracle
 
 | File | Purpose |
 |------|---------|
-| `src/App.svelte` | Root component — state, actions, and template (~270 lines) |
+| `src/App.svelte` | Root component — state, actions, and template (~360 lines) |
 | `src/lib/i18n.js` | `TRANSLATIONS` constant (ja/en) |
 | `src/lib/constants.js` | `DIALECTS` list and `SAMPLE_SQL` per dialect |
 | `src/lib/settings.js` | `loadSettings()` / `saveSettings()` for localStorage |
@@ -55,6 +61,3 @@ Five dialects are supported: `mysql`, `postgresql`, `snowflake`, `plsql` (Oracle
 | `src/app.css` | Tailwind import + base resets |
 | `src/main.js` | Svelte mount entry point |
 | `public/favicon.svg` | App icon (also used in the header) |
-| `public/icons.svg` | SVG sprite (currently unused) |
-
-`src/lib/Counter.svelte` is a leftover scaffold file — not imported anywhere.
