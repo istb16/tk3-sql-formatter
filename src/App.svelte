@@ -143,12 +143,12 @@
 
     <div class="tk-header__end">
       <!-- Language switcher -->
-      <div class="flex items-center rounded overflow-hidden border border-line text-xs font-semibold shrink-0">
+      <div class="flex items-center rounded border border-line text-xs font-semibold shrink-0">
         {#each [['en','EN'],['ja','JA']] as [val, label]}
           <button
             onclick={() => lang = val}
             aria-pressed={lang === val}
-            class="px-2.5 py-1 cursor-pointer border-0 transition-colors
+            class="px-2.5 py-1 cursor-pointer border-0 transition-colors first:rounded-l-[3px] last:rounded-r-[3px]
               {lang === val
                 ? 'bg-accent text-on-accent'
                 : 'bg-surface-2 text-muted hover:text-ink'}"
@@ -195,7 +195,7 @@
 
         <div class="mb-3">
           <label for="indent-style" class="text-xs text-muted block mb-1">{t.indentStyle}</label>
-          <select id="indent-style" bind:value={indentStyle} class="w-full bg-surface border border-line rounded px-2 py-1.5 text-sm text-ink focus:border-accent">
+          <select id="indent-style" bind:value={indentStyle} class="w-full bg-surface border border-line-strong rounded px-2 py-1.5 text-sm text-ink focus:border-accent">
             <option value="standard">Standard</option>
             <option value="tabularLeft">Tabular Left</option>
             <option value="tabularRight">Tabular Right</option>
@@ -228,7 +228,7 @@
               id={row.id}
               value={row.val}
               onchange={(e) => row.set(e.currentTarget.value)}
-              class="w-full bg-surface border border-line rounded px-2 py-1.5 text-sm text-ink focus:border-accent"
+              class="w-full bg-surface border border-line-strong rounded px-2 py-1.5 text-sm text-ink focus:border-accent"
             >
               {#each caseOptions as o}<option value={o.value}>{o.label}</option>{/each}
             </select>

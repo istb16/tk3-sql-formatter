@@ -13,6 +13,7 @@
   --color-body: var(--tk-body);
   --color-muted: var(--tk-muted);
   --color-line: var(--tk-line);
+  --color-line-strong: var(--tk-line-strong);
   --color-accent: var(--tk-accent);
   --color-on-accent: var(--tk-on-accent);
   --color-danger: var(--tk-danger);
