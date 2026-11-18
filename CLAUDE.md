@@ -48,6 +48,10 @@ Translations live in `src/lib/i18n.js` as the `TRANSLATIONS` constant. The deriv
 
 The UI follows the OS color scheme (`prefers-color-scheme`); there is no toggle. All colors come from the `--tk-*` tokens in `src/tk-base.css`, exposed to Tailwind in `src/app.css` as `bg`, `surface`, `surface-2`, `ink`, `body`, `muted`, `line`, `line-strong`, `accent`, `on-accent`, `danger`, `success` (e.g. `bg-surface`, `text-muted`, `border-line`). Borders that outline a form control (selects, the toggle track) use `line-strong` (3:1 against the surface); `line` is for separators and panel edges. Use these instead of raw Tailwind palette colors (`slate-*`, `blue-*`) or hex values so both schemes keep working. The header and footer use `.tk-header` / `.tk-footer`, and the main buttons `.tk-btn` / `.tk-btn--quiet`.
 
+### Narrow screens
+
+The three-column editor (options sidebar, input, output) is the `md` (768px) and up layout. Below `md` the page scrolls instead of being fixed to the viewport height: the header buttons wrap to a second row, the format options fold into a disclosure button above the editors (`optionsOpen`, closed at first and not saved), and the input and output panes stack, each `45svh` tall. Keep new layout classes mobile-first with `md:` for the desktop form so the desktop look does not change.
+
 ### Dialects
 
 Five dialects are supported: `mysql`, `postgresql`, `snowflake`, `plsql` (Oracle), `transactsql` (SQL Server). Defined in `src/lib/constants.js` alongside `SAMPLE_SQL`. The Oracle sample SQL uses named bind variables (`:EMPLOYEE_ID`, `:STATUS`, `:COUNTRY_ID`) — this is intentional and valid PL/SQL syntax.

@@ -1,6 +1,7 @@
 export const TRANSLATIONS = {
   ja: {
     autoFormat:        '自動整形',
+    options:           '整形オプション',
     sample:            'サンプル',
     clear:             'クリア',
     format:            '整形',
@@ -38,6 +39,7 @@ export const TRANSLATIONS = {
   },
   en: {
     autoFormat:        'Auto Format',
+    options:           'Format options',
     sample:            'Sample',
     clear:             'Clear',
     format:            'Format',
