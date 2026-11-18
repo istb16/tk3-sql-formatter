@@ -1,5 +1,30 @@
 @import "tailwindcss";
 
+/*
+ * tk-base.css (the shared tk3 apps base) is imported before this file in main.js.
+ * The utilities below map Tailwind color names onto its --tk-* tokens, so light and
+ * dark both come from tk-base.css. Do not write raw color values in components.
+ */
+@theme inline {
+  --color-bg: var(--tk-bg);
+  --color-surface: var(--tk-surface);
+  --color-surface-2: var(--tk-surface-2);
+  --color-ink: var(--tk-ink);
+  --color-body: var(--tk-body);
+  --color-muted: var(--tk-muted);
+  --color-line: var(--tk-line);
+  --color-line-strong: var(--tk-line-strong);
+  --color-accent: var(--tk-accent);
+  --color-on-accent: var(--tk-on-accent);
+  --color-danger: var(--tk-danger);
+  --color-success: var(--tk-green);
+  --font-mono: var(--tk-font-mono);
+}
+
+:root {
+  --tk-accent: var(--tk-blue);
+}
+
 *, *::before, *::after {
   box-sizing: border-box;
 }
@@ -8,4 +33,16 @@ html, body, #app {
   height: 100%;
   margin: 0;
   padding: 0;
+}
+
+/* the editors fill their panes edge to edge, so draw the focus ring inside them */
+.editor:focus-visible {
+  outline-offset: -2px;
+}
+
+/* a slim footer: the editors take the whole height of the window */
+.tk-footer.app-footer {
+  padding-block: 8px;
+  border-block-start: 1px solid var(--tk-line);
+  background: var(--tk-surface);
 }

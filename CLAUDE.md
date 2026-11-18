@@ -44,6 +44,10 @@ When `compactLists` is on, `expressionWidth` is set to `9999` on the sql-formatt
 
 Translations live in `src/lib/i18n.js` as the `TRANSLATIONS` constant. The derived value `t = $derived(TRANSLATIONS[lang])` gives the active translation object. All UI strings go through `t`. Adding a new UI string requires entries in both `ja` and `en` objects.
 
+### Colors and dark mode
+
+The UI follows the OS color scheme (`prefers-color-scheme`); there is no toggle. All colors come from the `--tk-*` tokens in `src/tk-base.css`, exposed to Tailwind in `src/app.css` as `bg`, `surface`, `surface-2`, `ink`, `body`, `muted`, `line`, `line-strong`, `accent`, `on-accent`, `danger`, `success` (e.g. `bg-surface`, `text-muted`, `border-line`). Borders that outline a form control (selects, the toggle track) use `line-strong` (3:1 against the surface); `line` is for separators and panel edges. Use these instead of raw Tailwind palette colors (`slate-*`, `blue-*`) or hex values so both schemes keep working. The header and footer use `.tk-header` / `.tk-footer`, and the main buttons `.tk-btn` / `.tk-btn--quiet`.
+
 ### Dialects
 
 Five dialects are supported: `mysql`, `postgresql`, `snowflake`, `plsql` (Oracle), `transactsql` (SQL Server). Defined in `src/lib/constants.js` alongside `SAMPLE_SQL`. The Oracle sample SQL uses named bind variables (`:EMPLOYEE_ID`, `:STATUS`, `:COUNTRY_ID`) — this is intentional and valid PL/SQL syntax.
@@ -58,6 +62,7 @@ Five dialects are supported: `mysql`, `postgresql`, `snowflake`, `plsql` (Oracle
 | `src/lib/settings.js` | `loadSettings()` / `saveSettings()` for localStorage |
 | `src/lib/formatter.js` | `formatSql()` + compact-list post-processing pipeline |
 | `src/lib/ToggleSwitch.svelte` | Reusable toggle switch component used in the header |
-| `src/app.css` | Tailwind import + base resets |
-| `src/main.js` | Svelte mount entry point |
-| `public/favicon.svg` | App icon (also used in the header) |
+| `src/tk-base.css` | Shared tk3 apps design base (color tokens for light/dark, header, footer, buttons). Unmodified copy of the canonical file in tk3-biz-html — never edit it here |
+| `src/app.css` | Tailwind import, Tailwind colors mapped to the `--tk-*` tokens, accent (`--tk-blue`), base resets |
+| `src/main.js` | Svelte mount entry point (imports `tk-base.css` before `app.css`) |
+| `public/icon.svg`, `public/icon-32.png`, `public/apple-touch-icon.png` | App icon (the SVG is also used in the header) |
