@@ -50,7 +50,7 @@ The UI follows the OS color scheme (`prefers-color-scheme`); there is no toggle.
 
 ### Narrow screens
 
-The three-column editor (options sidebar, input, output) is the `md` (768px) and up layout. Below `md` the page scrolls instead of being fixed to the viewport height: the header buttons wrap to a second row, the format options fold into a disclosure button above the editors (`optionsOpen`, closed at first and not saved), and the input and output panes stack, each `45svh` tall. Keep new layout classes mobile-first with `md:` for the desktop form so the desktop look does not change.
+The three-column editor (options sidebar, input, output) is the `lg` (1024px) and up layout; below that the three columns are too narrow (the title truncates and each pane is only ~260px at 768px). Below `lg` the page scrolls instead of being fixed to the viewport height: the header controls wrap (Sample / Clear / Format stay together as one row), the format options fold into a disclosure button above the editors (`optionsOpen`, closed at first and not saved), and the input and output panes stack, each `45svh` tall. Keep new layout classes mobile-first with `lg:` for the desktop form so the desktop look does not change.
 
 ### Dialects
 
