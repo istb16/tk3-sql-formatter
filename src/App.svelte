@@ -23,6 +23,8 @@
   let denseOperators  = $state(saved.denseOperators  ?? false);
   let nlBeforeSemi    = $state(saved.nlBeforeSemi    ?? false);
   let autoFormat      = $state(saved.autoFormat      ?? false);
+  // Narrow screens only: whether the folded format options are open (not saved)
+  let optionsOpen     = $state(false);
   let compactLists    = $state(saved.compactLists    ?? false);
   let inputSql        = $state('');
   let outputSql       = $state('');
@@ -132,16 +134,17 @@
 <svelte:window on:keydown={handleKeydown} />
 
 <!-- LAYOUT ROOT -->
-<div class="flex flex-col h-screen bg-bg text-ink overflow-hidden">
+<!-- Below md (768px) the page scrolls and the panes stack; from md up it is the full-height three-column editor. -->
+<div class="flex flex-col min-h-dvh md:h-screen bg-bg text-ink md:overflow-hidden">
 
   <!-- HEADER -->
-  <header class="tk-header shrink-0">
+  <header class="tk-header shrink-0 flex-wrap md:flex-nowrap">
     <a class="tk-header__home" href="/">
       <img src="/icon.svg" alt="" class="tk-header__icon" />
       <h1 class="tk-header__name">SQL FORMATTER</h1>
     </a>
 
-    <div class="tk-header__end">
+    <div class="tk-header__end flex-wrap md:flex-nowrap w-full md:w-auto">
       <!-- Language switcher -->
       <div class="flex items-center rounded border border-line text-xs font-semibold shrink-0">
         {#each [['en','EN'],['ja','JA']] as [val, label]}
@@ -156,23 +159,40 @@
         {/each}
       </div>
 
-      <div class="w-px h-5 bg-line mx-1"></div>
+      <div class="hidden md:block w-px h-5 bg-line mx-1"></div>
 
       <ToggleSwitch bind:checked={autoFormat} label={t.autoFormat} />
 
       <button onclick={loadSample} class="tk-btn tk-btn--quiet">{t.sample}</button>
       <button onclick={clearAll}   class="tk-btn tk-btn--quiet">{t.clear}</button>
       <button onclick={doFormat}   class="tk-btn">
-        {t.format} <span class="text-xs font-normal">Ctrl+↵</span>
+        {t.format} <span class="hidden md:inline text-xs font-normal">Ctrl+↵</span>
       </button>
     </div>
   </header>
 
   <!-- BODY -->
-  <div class="flex flex-1 overflow-hidden">
+  <div class="flex flex-col md:flex-row flex-1 md:overflow-hidden">
+
+    <!-- On a narrow screen the options are folded above the editors (closed at first) -->
+    <button
+      type="button"
+      class="md:hidden flex items-center justify-between px-4 h-11 bg-surface border-b border-line text-sm font-semibold text-ink cursor-pointer"
+      aria-expanded={optionsOpen}
+      aria-controls="format-options"
+      onclick={() => (optionsOpen = !optionsOpen)}
+    >
+      {t.options}
+      <svg class="w-4 h-4 transition-transform motion-reduce:transition-none {optionsOpen ? 'rotate-180' : ''}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
+      </svg>
+    </button>
 
     <!-- OPTIONS SIDEBAR -->
-    <aside class="w-60 shrink-0 bg-surface border-r border-line overflow-y-auto p-4 flex flex-col gap-4">
+    <aside
+      id="format-options"
+      class="{optionsOpen ? 'flex' : 'hidden'} md:flex w-full md:w-60 shrink-0 bg-surface border-b md:border-b-0 md:border-r border-line md:overflow-y-auto p-4 flex-col gap-4"
+    >
 
       <!-- Dialect -->
       <section>
@@ -293,10 +313,10 @@
     </aside>
 
     <!-- EDITORS -->
-    <div class="flex flex-1 overflow-hidden">
+    <div class="flex flex-col md:flex-row flex-1 md:overflow-hidden">
 
       <!-- Input panel -->
-      <div class="flex flex-col flex-1 min-w-0 border-r border-line">
+      <div class="flex flex-col h-[45svh] md:h-auto md:flex-1 min-w-0 border-b md:border-b-0 md:border-r border-line">
         <div class="flex items-center justify-between h-11 px-4 bg-surface border-b border-line shrink-0">
           <span class="text-xs font-semibold text-muted uppercase tracking-widest">{t.inputSql}</span>
           <span class="text-xs text-muted">{statsIn.lines} {t.lines} / {statsIn.chars} {t.chars}</span>
@@ -310,7 +330,7 @@
       </div>
 
       <!-- Output panel -->
-      <div class="flex flex-col flex-1 min-w-0">
+      <div class="flex flex-col h-[45svh] md:h-auto md:flex-1 min-w-0">
         <div class="flex items-center justify-between h-11 px-4 bg-surface border-b border-line shrink-0">
           <span class="text-xs font-semibold text-muted uppercase tracking-widest">{t.outputSql}</span>
           <div class="flex items-center gap-3">
