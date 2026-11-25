@@ -469,7 +469,7 @@ describe('formatSql', () => {
       ['snowflake', '//'],
       ['sql', '--'],
       ['trino', '--'],
-    ])('reads %s as a line comment in %s', (language, comment) => {
+    ])('reads %s as a %s line comment', (language, comment) => {
       stopsAtComment(formatSql(`SELECT a, ${comment} c\n b FROM t`, opts(language)), comment);
     });
 
@@ -497,8 +497,110 @@ describe('formatSql', () => {
     });
 
     it('does not treat a backslash as an escape where the dialect has none', () => {
-      // Trino の '' は \ を escape として扱わないので、そもそも構文エラーになる。
-      expect(() => formatSql("SELECT 'O\\'Brien' AS a FROM t", opts('trino'))).toThrow();
+      // Trino では 'C:\' の \ は普通の文字で、' で文字列が閉じる。\' を escape と
+      // 読むと文字列が閉じないまま残り、後ろの select list が連結されなくなる。
+      const result = formatSql("SELECT 'C:\\' AS a, bbbbbbbb, cccccccc FROM t", opts('trino'));
+      expect(result.split('\n')[0]).toBe("SELECT 'C:\\' AS a, bbbbbbbb, cccccccc");
+    });
+
+    it.each([
+      ['bigquery', "r'C:\\'"],
+      ['bigquery', "RB'C:\\'"],
+      ['bigquery', "BR'C:\\'"],
+      ['bigquery', "b'C:\\'"],
+      ['bigquery', 'R"C:\\"'],
+      ['spark', "r'C:\\'"],
+      ['spark', "x'C:\\'"],
+      ['spark', 'R"C:\\"'],
+    ])('reads a backslash in a raw string as plain text in %s: %s', (language, literal) => {
+      // raw 文字列では \ は escape ではないので、末尾の \ の直後の引用符で閉じる。
+      const result = formatSql(
+        `SELECT REPLACE(p, ${literal}, '/') AS a, b, c FROM t`,
+        opts(language)
+      );
+      expect(result.split('\n')[0]).toBe(`SELECT REPLACE(p, ${literal}, '/') AS a, b, c`);
+    });
+
+    it.each([
+      ['sql', "X'C:\\'"],
+      ['mysql', "X'C:\\'"],
+      ['mysql', "b'C:\\'"],
+      ['mariadb', "B'C:\\'"],
+      ['tidb', "x'C:\\'"],
+      ['singlestoredb', "B'C:\\'"],
+    ])('reads a backslash in a hex or bit string as plain text in %s: %s', (language, literal) => {
+      // X'...' / B'...' は raw 文字列で、末尾の \ の直後の引用符で閉じる。
+      const result = formatSql(`SELECT ${literal} AS a, b, c FROM t`, opts(language));
+      expect(result.split('\n')[0]).toBe(`SELECT ${literal} AS a, b, c`);
+    });
+
+    it.each([
+      ['bigquery', "abr'it\\'s--x'"],
+      ['bigquery', "xb'it\\'s--x'"],
+      ['spark', "ar'it\\'s--x'"],
+      ['mysql', "ab'it\\'s--x'"],
+      ['sql', "ax'it\\'s--x'"],
+      // X"..." is not raw in the MySQL family: only '...' takes the prefix.
+      // (sql-formatter writes it as X "...", so this too holds either way.)
+      ['mysql', 'X"it\\"s--x"'],
+      ['sql', "B'it\\'s--x'"],
+    ])('still honours backslash escapes after a non-raw prefix in %s: %s', (language, literal) => {
+      // 識別子の末尾の r / b / x は raw の接頭辞ではない。raw と読むと \' で閉じて
+      // しまい、後ろの --x' が行コメントに見えて連結が止まる。
+      // 今の sql-formatter は接頭辞にならない識別子と文字列の間に空白を入れる
+      // (abr 'it\'s--x') ので、formatter.js の接頭辞の境界の規則がなくてもこの
+      // テストは通る。sql-formatter の出力がそうでなくなったときの備え。
+      const result = formatSql(`SELECT ${literal} AS a, b, c FROM t`, opts(language));
+      expect(result.split('\n')[0]).toMatch(/--x['"] AS a, b, c$/);
+    });
+
+    it.each([
+      ['sql', "X'41\\'"],
+      ['mysql', "X'41\\'"],
+      ['mysql', "B'1\\'"],
+      ['mariadb', "X'41\\'"],
+      ['tidb', "B'1\\'"],
+      ['singlestoredb', "X'41\\'"],
+    ])('keeps a later multi-line literal intact after a hex or bit string in %s: %s', (language, literal) => {
+      // X'41\' の \ を escape と読むと引用符の対応がずれ、後ろの複数行の文字列の
+      // 中身が連結されてしまう。
+      const text = "'hello\n  foo\n    bar\n  baz'";
+      const result = formatSql(`SELECT ${literal} AS a, ${text} AS b, c FROM t`, opts(language));
+      expect(result).toContain(`${literal} AS a,\n  ${text} AS b`);
+    });
+
+    it.each([
+      "q'[it's]'",
+      "q'(it's)'",
+      "q'{it's}'",
+      "q'<it's>'",
+      "q'!it's!'",
+      "Q'#it's#'",
+      "q']it's]'",
+      "nq'[it's]'",
+      "NQ'[it's]'",
+    ])('reads the Oracle q-string %s as one string', (literal) => {
+      // q-string の中の ' は文字列を閉じない。閉じると読むと引用符の対応がずれ、
+      // 後ろの複数行の文字列の中身が連結されてしまう。
+      const text = "'hello\n  foo\n    bar\n  baz'";
+      const result = formatSql(`SELECT ${literal} AS a, ${text} AS b, c FROM t`, opts('plsql'));
+      expect(result).toContain(`${literal} AS a,\n  ${text} AS b`);
+      // 1 行に収まる場合は連結される(中の -- はコメントではない)。
+      const joined = formatSql(`SELECT ${literal.replace("s", "s--x")} AS a, b, c FROM t`, opts('plsql'));
+      expect(joined.split('\n')[0]).toBe(`SELECT ${literal.replace("s", "s--x")} AS a, b, c`);
+    });
+
+    it('reads q followed by a quote as an ordinary string outside a q-string', () => {
+      // 同じ行で閉じない q'... は sql-formatter でも q-string ではなく、q と
+      // 通常の文字列になる。ここで ' は '' と書いて閉じない限り文字列が続く。
+      const result = formatSql("SELECT q'it''s' AS a, b, c FROM t", opts('plsql'));
+      expect(result.split('\n')[0]).toBe("SELECT q 'it''s' AS a, b, c");
+    });
+
+    it('still honours backslashes in a triple-quoted raw string in BigQuery', () => {
+      // sql-formatter は R'''...''' の中の \ を escape として読む。
+      const result = formatSql("SELECT R'''a\\'''b--x''' AS a, b, c FROM t", opts('bigquery'));
+      expect(result.split('\n')[0]).toBe("SELECT R'''a\\'''b--x''' AS a, b, c");
     });
 
     it('keeps a dollar-quoted string spanning lines in DuckDB', () => {
@@ -506,6 +608,61 @@ describe('formatSql', () => {
       const result = formatSql(`SELECT ${literal} AS x, y FROM t`, opts('duckdb'));
       expect(result).toContain(literal);
     });
+
+    it.each(['duckdb', 'clickhouse', 'postgresql'])(
+      'keeps a tagged dollar-quoted string spanning lines in %s',
+      (language) => {
+        const literal = '$x$line1\n  line2$x$';
+        const result = formatSql(`SELECT ${literal} AS a, b FROM t`, opts(language));
+        expect(result).toContain(literal);
+      }
+    );
+
+    it.each([
+      ['postgresql', '$_1$'],
+      ['duckdb', '$_1$'],
+      ['clickhouse', '$_1$'],
+      ['postgresql', '$tag_2$'],
+      // ClickHouse のタグは数字で始まってもよい。
+      ['clickhouse', '$1$'],
+    ])('reads the tag of a dollar-quoted string in %s: %s', (language, tag) => {
+      const literal = `${tag}it's--x${tag}`;
+      const result = formatSql(`SELECT ${literal} AS a, b, c FROM t`, opts(language));
+      expect(result.split('\n')[0]).toBe(`SELECT ${literal} AS a, b, c`);
+    });
+
+    it.each(['postgresql', 'duckdb'])(
+      'does not read $1$2 as the start of a dollar-quoted string in %s',
+      (language) => {
+        // PostgreSQL / DuckDB の $1 は位置パラメータで、タグは数字で始まれない。
+        // $1$ をタグと読むと文字列が閉じないまま残り、後ろが連結されなくなる。
+        // 今の sql-formatter は $1$2 を $1 $2 と分けて出力するので、TAGGED_DOLLAR
+        // が数字を受け付けてもこのテストは通る。出力が変わったときの備え。
+        const result = formatSql("SELECT $1$2 AS a, 'it''s' AS b, c FROM t", opts(language));
+        expect(result.split('\n')[0]).toBe("SELECT $1 $2 AS a, 'it''s' AS b, c");
+      }
+    );
+
+    it.each(['sqlite', 'transactsql'])(
+      'keeps a bracketed identifier spanning lines in %s',
+      (language) => {
+        // [] の中の改行は識別子名の一部なので、連結すると別の列を指してしまう。
+        for (const ident of ['[hello\n  world]', '[a]]\n  b]']) {
+          const result = formatSql(`SELECT ${ident} AS a, b FROM t`, opts(language));
+          expect(result).toContain(ident);
+        }
+      }
+    );
+
+    it.each(['sqlite', 'transactsql'])(
+      'reads quotes and ]] inside a bracketed identifier as part of it in %s',
+      (language) => {
+        // [it's] の ' を文字列の開始と読むと、行末まで文字列が続いて連結が止まる。
+        const ident = "[it's]]--x]";
+        const result = formatSql(`SELECT ${ident} AS a, b, c FROM t`, opts(language));
+        expect(result.split('\n')[0]).toBe(`SELECT ${ident} AS a, b, c`);
+      }
+    );
 
     it.each(['postgresql', 'transactsql', 'db2i', 'duckdb'])(
       'keeps a nested block comment spanning lines in %s',
@@ -527,6 +684,17 @@ describe('formatSql', () => {
       // ''' を ' が 3 つと読むと、中の ' が引用符の開始に見えて行末まで文字列が続く。
       const result = formatSql("SELECT '''it's''' AS x, y FROM t", opts('bigquery'));
       expect(result.split('\n')[0]).toBe("SELECT '''it's''' AS x, y");
+    });
+
+    it.each([
+      // \' は escape なので、その直後の ''' で閉じたと読んではいけない。
+      "'''a\\'''b--x'''",
+      // '' は triple quote の中ではただの 2 文字。
+      "'''a''b'''",
+      '"""a--b"""',
+    ])('reads %s as one BigQuery string', (literal) => {
+      const result = formatSql(`SELECT ${literal} AS x, y, z FROM t`, opts('bigquery'));
+      expect(result.split('\n')[0]).toBe(`SELECT ${literal} AS x, y, z`);
     });
 
     it('does not mistake an empty string for a triple quote in BigQuery', () => {
@@ -602,6 +770,20 @@ describe('formatSql', () => {
       },
     });
 
+    /**
+     * `prefix` followed by `quote` is a raw string where a backslash in it does
+     * not stop the closing quote from closing it: either a raw string, or the
+     * prefix as an identifier followed by a string that takes no escapes. Where
+     * it does not parse, the quote takes backslash escapes after the prefix,
+     * and reading the prefix as raw would end `it\'s` at its backslash.
+     */
+    const rawString = (prefix, quote) => ({
+      name: `raw ${prefix}${quote}...${quote} strings`,
+      supports: (language) => parses(`SELECT ${prefix}${quote}\\${quote} FROM t`, language),
+      check: joinsAcrossLiteral(`${prefix}${quote}C:\\${quote}`),
+      withoutIt: `${prefix}${quote}it\\${quote}s--x${quote}`,
+    });
+
     const keepsSpanningLines = (name, text) => (language) => {
       const result = formatSql(`SELECT ${text} AS x, y FROM t`, opts(language));
       expect(result, `${language}: changed ${name} spanning lines`).toContain(text);
@@ -615,22 +797,69 @@ describe('formatSql', () => {
         name: "backslash escapes in '...'",
         supports: (language) => parses("SELECT 'a\\'b' FROM t", language),
         check: joinsAcrossLiteral("'O\\'Brien--x'"),
+        // Where \ escapes nothing, 'C:\' ends at its last quote. Reading \' as
+        // an escape leaves the string open, and nothing after it is joined.
+        withoutIt: "'C:\\'",
       },
       {
         name: 'backslash escapes in "..."',
         supports: (language) => parses('SELECT "a\\"b" FROM t', language),
         check: joinsAcrossLiteral('"O\\"Brien--x"'),
+        withoutIt: '"C:\\"',
       },
       {
         name: "backslash escapes in E'...'",
         supports: (language) => parses("SELECT E'a\\'b' FROM t", language),
         check: joinsAcrossLiteral("E'O\\'Brien--x'"),
+        withoutIt: "E'C:\\'",
+      },
+      ...['R', 'B', 'X', 'RB', 'BR'].flatMap((prefix) => [
+        rawString(prefix, "'"),
+        rawString(prefix, '"'),
+      ]),
+      {
+        name: "Oracle q'...' strings",
+        // Only a q-string makes the unterminated quote inside legal.
+        supports: (language) => parses("SELECT q'[a'b]' FROM t", language),
+        check: (language) => {
+          for (const literal of ["q'[it's--x]'", "q'(it's--x)'", "q'{it's--x}'", "q'<it's--x>'", "q'+it's--x+'"]) {
+            joinsAcrossLiteral(literal)(language);
+          }
+        },
+        // Elsewhere this is q, '+it', s, + and '--x'. Read as a q-string, it
+        // ends before --x', which then looks like a line comment.
+        withoutIt: "q'+it's+'--x'",
       },
       {
         name: 'dollar-quoted strings',
         // Only a dollar-quoted string makes the unterminated quote inside legal.
         supports: (language) => parses("SELECT $$a 'b$$ FROM t", language),
         check: keepsSpanningLines('a dollar-quoted string', '$$hello\n  world$$'),
+      },
+      {
+        name: 'tagged dollar-quoted strings',
+        supports: (language) => parses("SELECT $t$a 'b$t$ FROM t", language),
+        check: (language) => {
+          keepsSpanningLines('a tagged dollar-quoted string', '$t$hello\n  world$t$')(language);
+          // A $ inside, or a different tag, does not close it.
+          joinsAcrossLiteral("$t$it's $$ $u$--x$t$")(language);
+        },
+        // Where $name is a variable (Snowflake) or part of an identifier, $a$
+        // opens nothing; read as a tag it would leave a string open to the end.
+        withoutIt: '$a$x',
+      },
+      {
+        name: 'bracketed identifiers',
+        // Only a bracketed identifier makes the unterminated quote inside legal.
+        supports: (language) => parses("SELECT [a'b] FROM t", language),
+        check: (language) => {
+          keepsSpanningLines('a bracketed identifier', '[hello\n  world]')(language);
+          joinsAcrossLiteral("[it's]]--x]")(language);
+        },
+        // Elsewhere [ is a subscript and 'k]' a string inside it. Read as a
+        // bracketed identifier, ['k] ends at the first ] and the quote after it
+        // opens a string that never closes.
+        withoutIt: "m['k]']",
       },
       {
         name: 'triple-quoted strings',
@@ -673,9 +902,29 @@ describe('formatSql', () => {
       }
     );
 
+    /**
+     * The probes above only visit the dialects that have a feature, so a
+     * feature switched on where sql-formatter does not have it would go
+     * unnoticed. `withoutIt` is a snippet that parses only where the feature is
+     * missing (or is filtered to those dialects by `supports`) and that the
+     * feature, wrongly applied, would misread: a literal ending in a backslash
+     * that never closes, a raw string ending early so its tail reads as a
+     * comment, a dollar tag or bracket that opens something that never closes.
+     */
+    it.each(
+      CAPABILITIES.filter((cap) => cap.withoutIt).map((cap) => [cap.name, cap])
+    )('leaves %s off where sql-formatter does not have them', (_name, cap) => {
+      const dialects = DIALECTS.map((d) => d.value).filter(
+        (language) => !cap.supports(language) && parses(`SELECT ${cap.withoutIt} FROM t`, language)
+      );
+      expect(dialects.length, `no dialect to check ${cap.name} against`).toBeGreaterThan(0);
+      for (const language of dialects) joinsAcrossLiteral(cap.withoutIt)(language);
+    });
+
     it('leaves no dialect without a lexical rule it needs', () => {
       // Every dialect must at least handle `--`; the rest it opts into.
-      const covered = new Set(applies(CAPABILITIES[0]));
+      const dashes = CAPABILITIES.find((cap) => cap.name === lineComment('--').name);
+      const covered = new Set(applies(dashes));
       const missing = DIALECTS.map((d) => d.value).filter((v) => !covered.has(v));
       expect(missing, 'dialects sql-formatter gives no -- comment').toEqual([]);
     });
