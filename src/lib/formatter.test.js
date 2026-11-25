@@ -225,22 +225,40 @@ describe('formatSql', () => {
       expect(result).toContain('EXTRACT(YEAR FROM created_at)');
     });
 
+    /** コメント行の後ろの列が、コメントに飲み込まれず次の行以降に残っていること。 */
+    const expectNotSwallowed = (result, marker, column) => {
+      const lines = result.split('\n');
+      const commentLine = lines.findIndex((l) => l.includes(marker));
+      expect(commentLine).toBeGreaterThan(-1);
+      expect(lines[commentLine]).not.toMatch(new RegExp(`\\b${column}\\b`));
+      expect(lines.slice(commentLine + 1).some((l) => new RegExp(`\\b${column}\\b`).test(l))).toBe(true);
+    };
+
     it('does not join across a line comment', () => {
       const result = formatSql(
         'SELECT id, -- 主キー\n name FROM users WHERE id = 1',
         { ...PG, compactLists: true }
       );
-      expect(result).toMatch(/--.*\n/);
-      expect(result.split('\n').filter((l) => /--/.test(l))).toHaveLength(1);
+      expectNotSwallowed(result, '--', 'name');
     });
 
-    it('does not join across a # comment in MySQL', () => {
-      // `#` はコメントなので、連結すると後ろの列がコメントの中に消える。
-      const result = formatSql('SELECT id, # 主キー\n name FROM users WHERE id = 1', {
-        language: 'mysql', keywordCase: 'upper', expressionWidth: 60, compactLists: true,
+    it.each(['mysql', 'mariadb', 'tidb', 'singlestoredb'])(
+      'does not join across a # comment in %s',
+      (language) => {
+        // `#` はコメントなので、連結すると後ろの列がコメントの中に消える。
+        const result = formatSql('SELECT id, # 主キー\n name FROM users WHERE id = 1', {
+          language, keywordCase: 'upper', expressionWidth: 60, compactLists: true,
+        });
+        expectNotSwallowed(result, '#', 'name');
+      }
+    );
+
+    it('does not join across a // comment in Snowflake', () => {
+      // Snowflake では `//` も行コメント。
+      const result = formatSql('SELECT a, // メモ\n b FROM t', {
+        language: 'snowflake', keywordCase: 'upper', expressionWidth: 60, compactLists: true,
       });
-      expect(result).toContain('name');
-      expect(result.split('\n').find((l) => l.includes('#'))).not.toMatch(/name/);
+      expectNotSwallowed(result, '//', 'b');
     });
 
     it('treats # as an operator outside MySQL', () => {
@@ -290,6 +308,141 @@ describe('formatSql', () => {
       // 同じ深さでも、タブを使わなければ 5 + 29 = 34 桁なので連結する。
       const spaces = formatSql(sql, { ...PG, compactLists: true, tabWidth: 1 });
       expect(spaces).toContain('WHERE v.id = u.id AND v.x = 1');
+    });
+
+    it('measures full-width characters as two columns', () => {
+      // 「WHERE name = '山田太郎' AND kana = 'ヤマダタロウ'」は 39 文字だが、
+      // 全角 10 文字が 2 桁ずつなので画面上は 49 桁ある。
+      const sql = "SELECT id, name FROM users WHERE name = '山田太郎' AND kana = 'ヤマダタロウ'";
+      const joined = "WHERE name = '山田太郎' AND kana = 'ヤマダタロウ'";
+      expect(formatSql(sql, { ...PG, compactLists: true, expressionWidth: 45 })).not.toContain(joined);
+      expect(formatSql(sql, { ...PG, compactLists: true, expressionWidth: 49 })).toContain(joined);
+    });
+
+    it('measures only the argument list when rejoining a function call', () => {
+      // 関数の引数を戻すときは引数の長さだけを測るので、深い位置では行全体が
+      // expressionWidth を超えることがある（意図した動作）。
+      const sql =
+        'SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.id = t.id' +
+        ' AND EXISTS (SELECT 1 FROM v WHERE v.d = EXTRACT(YEAR FROM CURRENT_DATE)))';
+      const result = formatSql(sql, { ...PG, compactLists: true, expressionWidth: 30 });
+      const line = result.split('\n').find((l) => l.includes('EXTRACT('));
+      expect(line.trim()).toBe('v.d = EXTRACT(YEAR FROM CURRENT_DATE)');
+      expect(line.length).toBeGreaterThan(30);
+    });
+
+    it.each([
+      ['SUBSTRING … FROM … FOR', 'SELECT SUBSTRING(s FROM 1 FOR 2) AS x FROM t', 'SUBSTRING(s FROM 1 FOR 2) AS x'],
+      ['CAST … AS', 'SELECT CAST(x AS INT) AS y FROM t', 'CAST(x AS INT) AS y'],
+      ['POSITION … IN', 'SELECT POSITION(a IN b) AS p FROM t', 'POSITION(a IN b) AS p'],
+      ['EXTRACT … FROM', 'SELECT EXTRACT(YEAR FROM d) AS y FROM t', 'EXTRACT(YEAR FROM d) AS y'],
+    ])('keeps %s arguments on one line', (_name, sql, expected) => {
+      const result = formatSql(sql, { ...PG, compactLists: false });
+      expect(result.split('\n')[1]).toBe(`  ${expected}`);
+    });
+
+    it('does not treat IN or a window ORDER BY as function arguments', () => {
+      const result = formatSql(
+        'SELECT ROW_NUMBER() OVER (PARTITION BY a ORDER BY b) AS rn FROM t WHERE x IN (1, 2, 3)',
+        { ...PG, compactLists: false }
+      );
+      // OVER ( ... ) は関数呼び出しではないので、展開モードではそのまま。
+      expect(result).toBe(
+        [
+          'SELECT',
+          '  ROW_NUMBER() OVER (',
+          '    PARTITION BY',
+          '      a',
+          '    ORDER BY',
+          '      b',
+          '  ) AS rn',
+          'FROM',
+          '  t',
+          'WHERE',
+          '  x IN (1, 2, 3)',
+        ].join('\n')
+      );
+    });
+
+    it('joins each statement on its own and keeps the blank line between them', () => {
+      const result = formatSql('SELECT a, b FROM t;\n\nSELECT c, d FROM u WHERE c = 1', {
+        ...PG, compactLists: true,
+      });
+      expect(result).toBe('SELECT a, b\nFROM t;\n\nSELECT c, d\nFROM u\nWHERE c = 1');
+    });
+
+    it('defaults expressionWidth to 50 and tabWidth to 2', () => {
+      const sql = "SELECT id, name, email FROM users WHERE id = 1 AND status = 'active'";
+      const base = { language: 'postgresql', keywordCase: 'upper', compactLists: true };
+      const byDefault = formatSql(sql, base);
+      expect(byDefault).toBe(formatSql(sql, { ...base, expressionWidth: 50 }));
+      expect(byDefault).not.toBe(formatSql(sql, { ...base, expressionWidth: 20 }));
+
+      // タブ 5 段 + 29 文字は、タブ幅 2 なら 39 桁で幅 50 に収まる。
+      const deep =
+        'SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.id = t.id AND u.flag' +
+        ' AND EXISTS (SELECT 1 FROM v WHERE v.id = u.id AND v.x = 1))';
+      expect(formatSql(deep, { ...base, useTabs: true })).toContain('WHERE v.id = u.id AND v.x = 1');
+      expect(formatSql(deep, { ...base, useTabs: true, tabWidth: 8 })).not.toContain('WHERE v.id = u.id AND v.x = 1');
+    });
+  });
+
+  // ── 文字列リテラルとコメント ───────────────────────────────────────────────
+  // 連結によってリテラルの値が変わったり、コメントが後ろの式を飲み込んだり
+  // しないことを確認する。squash() は空白をすべて消すので、リテラル内部の
+  // 空白の変化は見えない。ここではリテラルそのものの文字列を比較する。
+  describe('literals and comments', () => {
+    const PG = { language: 'postgresql', keywordCase: 'upper', expressionWidth: 60, compactLists: true };
+
+    it.each([
+      ['a quoted string', "'a\nb\n  c\n   d\ne'"],
+      ['a dollar-quoted string', '$$hello\n  world\n  again$$'],
+      ['a tagged dollar-quoted string', '$body$\n  BEGIN\n    RETURN 1;\n  END\n$body$'],
+    ])('keeps %s spanning lines exactly as written', (_name, literal) => {
+      const sql = `SELECT ${literal} AS x, y FROM t`;
+      const result = formatSql(sql, PG);
+      expect(result).toContain(literal);
+      // リテラルの外も壊れていないこと。リテラルを伏せ字にして比べる。
+      const mask = (s) => s.split(literal).join('<LIT>').replace(/\s+/g, ' ').trim();
+      expect(mask(result)).toBe('SELECT <LIT> AS x, y FROM t');
+      expect(formatSql(result, PG)).toBe(result);
+    });
+
+    it('keeps indented JSON inside a string literal as written', () => {
+      const json = "'{\n  \"a\": {\n    \"b\": 1\n  }\n}'";
+      const result = formatSql(`INSERT INTO t (id, doc) VALUES (1, ${json})`, PG);
+      expect(result).toContain(json);
+    });
+
+    it('keeps a dollar-quoted string in Snowflake', () => {
+      const literal = '$$hello\n  world\n  again$$';
+      const result = formatSql(`SELECT ${literal} AS a, b FROM t`, {
+        ...PG, language: 'snowflake',
+      });
+      expect(result).toContain(literal);
+    });
+
+    it('joins lines around a string that only looks like a comment', () => {
+      // 文字列の中の -- はコメントではないので、連結を止めない。
+      const result = formatSql("SELECT 'a--b' AS a, 'it''s' AS b, c FROM t", PG);
+      expect(result.split('\n')[0]).toBe("SELECT 'a--b' AS a, 'it''s' AS b, c");
+    });
+
+    it('does not join across a comment after a doubled quote', () => {
+      const result = formatSql("SELECT 'it''s' AS a, -- c\n b FROM t", PG);
+      expect(result).toContain("'it''s' AS a, -- c");
+      expect(result.split('\n').find((l) => l.includes('--'))).not.toMatch(/\bb\b/);
+    });
+
+    it('does not join across a comment after a backslash-escaped quote in MySQL', () => {
+      // \' を引用符の終わりと読むと、後ろの -- が文字列の中にあると誤認する。
+      const result = formatSql("SELECT 'O\\'Brien' AS a, -- c\n b FROM t", {
+        ...PG, language: 'mysql',
+      });
+      const lines = result.split('\n');
+      const commentLine = lines.find((l) => l.includes('--'));
+      expect(commentLine.trim()).toBe("'O\\'Brien' AS a, -- c");
+      expect(lines.slice(lines.indexOf(commentLine) + 1).some((l) => l.trim() === 'b')).toBe(true);
     });
   });
 });

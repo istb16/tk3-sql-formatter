@@ -39,12 +39,14 @@ sql-formatter encodes the block structure of a statement in its indentation, so 
 
 A node is joined when:
 
-- **Compact mode** (`compactLists`) is on and the joined line fits within `expressionWidth` — this is the only thing that decides where a line ends, so no joined line can exceed the width. Long lines that sql-formatter itself could not split are left alone.
-- Or the node is a function call that sql-formatter broke on a keyword that only looks like a clause (`EXTRACT(YEAR FROM d)`, `SUBSTRING(s FROM 1 FOR 2)`, `CAST(x AS INT)`, `POSITION(a IN b)`), and the argument list itself fits within `expressionWidth`. These are rejoined in both modes. The argument list is measured rather than the whole line, so a short call is kept together however deeply it sits, while a genuinely long one keeps the wrapping sql-formatter chose for it.
+- **Compact mode** (`compactLists`) is on and the joined line, indent included, fits within `expressionWidth`. Long lines that sql-formatter itself could not split are left alone.
+- Or the node is a function call that sql-formatter broke on a keyword that only looks like a clause (`EXTRACT(YEAR FROM d)`, `SUBSTRING(s FROM 1 FOR 2)`, `CAST(x AS INT)`, `POSITION(a IN b)`), and the argument list itself fits within `expressionWidth`. These are rejoined in both modes. Only the argument list is measured, not the indent or the rest of the line, so a short call is kept together however deeply it sits — the resulting line may then be wider than `expressionWidth` — while a genuinely long one keeps the wrapping sql-formatter chose for it.
 
-Widths are counted in display columns: a tab in the indent counts as `tabWidth` columns, not one character.
+Widths are counted in display columns: a tab in the indent counts as `tabWidth` columns, and a full-width (East Asian Wide) character such as a kanji counts as two.
 
-A node is never joined when its lines contain a line comment, a string literal or a block comment spanning lines, or a CTE opener (`name AS (`) — CTE bodies stay expanded whatever the width. A line comment is `--` everywhere, plus `#` in the MySQL family (`mysql`, `mariadb`, `tidb`, `singlestoredb`); `#` must not be treated as a comment elsewhere because PostgreSQL uses `#>` and `#>>` as JSON operators.
+A node is never joined when its lines contain a line comment, a line that belongs to a multi-line string literal or block comment, or a CTE opener (`name AS (`) — CTE bodies stay expanded whatever the width. `lexLines()` lexes the whole sql-formatter output in one pass, carrying the in-string / in-comment state across lines, so the middle lines of a long literal (which contain no quote of their own) are recognised too. It knows `'`, `"`, `` ` ``, dollar-quoted strings (`$$…$$` in `postgresql`/`snowflake`/`clickhouse`, `$tag$…$tag$` in `postgresql`), backslash escapes where the dialect has them (MySQL family, Snowflake `'…'`, PostgreSQL `E'…'`) and nested block comments (`postgresql`, `transactsql`).
+
+The line-comment prefixes are per dialect, following sql-formatter's `lineCommentTypes` (the `SYNTAX` table in `formatter.js`): `--` everywhere, `#` in `mysql`, `mariadb`, `tidb`, `singlestoredb`, `bigquery`, `clickhouse`, `n1ql`, and `//` in `snowflake`. `#` must not be treated as a comment elsewhere because PostgreSQL uses `#>` and `#>>` as JSON operators.
 
 ### i18n
 
