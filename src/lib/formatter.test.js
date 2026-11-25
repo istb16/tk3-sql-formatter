@@ -654,19 +654,31 @@ describe('formatSql', () => {
     it('does not rescan the rest of the input for every {{ that never balances', () => {
       // {{ f( }} のように }} はあるが括弧が閉じない式が続く場合も、フォール
       // バックの前に残り全体を走査しない（以前は 40 KB で約 0.9 秒かかった）。
-      // 機械の速さに左右されないよう、絶対値ではなく入力 8 倍に対する比で
-      // 確かめる。線形なら 3 倍程度、二次なら 60 倍以上になる。
-      const run = (n) => {
-        const sql = 'SELECT ' + Array.from({ length: n }, () => '{{ f( }}').join(', ');
-        const t0 = performance.now();
-        formatSql(sql, ON);
-        return performance.now() - t0;
+      // 時間ではなく走査の歩数で確かめる。jinjaEnd() は括弧を数える一周に
+      // つき '([{'.includes() を 1 回呼ぶので、その回数が走査した文字数に
+      // なる。入力を 8 倍にしたとき、線形なら 8 倍前後にしかならない（上限を
+      // 外すと 64 倍になることを確かめてある）。呼び出しを記録すると量が多す
+      // ぎるので、vi.spyOn ではなく数えるだけの差し替えで測る。
+      const real = String.prototype.includes;
+      let calls = 0;
+      String.prototype.includes = function (...args) {
+        calls++;
+        return real.apply(this, args);
       };
-      run(1000); // JIT を暖めてから測る
-      const small = run(1000);
-      const large = run(8000);
-      expect(large / small).toBeLessThan(10);
-    }, 60000);
+      const steps = (n) => {
+        const sql = 'SELECT ' + Array.from({ length: n }, () => '{{ f( }}').join(', ');
+        calls = 0;
+        formatSql(sql, ON);
+        return calls;
+      };
+      try {
+        const small = steps(500);
+        const large = steps(4000);
+        expect(large / small).toBeLessThan(20);
+      } finally {
+        String.prototype.includes = real;
+      }
+    });
 
     it('ends a {{ ... }} whose close is far past its first }} at that first }}', () => {
       // 深さを追う走査は JINJA_LOOKAHEAD 文字で打ち切る。実在する式はこの幅に
