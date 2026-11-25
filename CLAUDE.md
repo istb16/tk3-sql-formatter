@@ -52,7 +52,12 @@ The line-comment prefixes are per dialect, following sql-formatter's `lineCommen
 
 With the `ignoreTemplates` option (the "Ignore template syntax" toggle), SQL carrying dbt / Jinja expressions (`{{ ref('orders') }}`) or MyBatis parameters (`#{id}`, `${raw}`) is formatted instead of failing to parse. `formatSql()` passes `TEMPLATE_PARAM_TYPES` as sql-formatter's `paramTypes`, so each placeholder becomes one parameter token and its text comes through untouched — no case folding and no re-spacing inside. Statement blocks such as `{% if %}` are out of scope: a statement carrying one is not valid SQL on its own.
 
-sql-formatter settles where a line comment starts before it looks at `paramTypes`, so in the MySQL family (where `#` opens a comment) `#{id}` would swallow the rest of the line whatever `paramTypes` says. The `#` of `#{` is therefore swapped for `HASH_SENTINEL` (`\u0001`, which no dialect gives a meaning to) for the duration of the `format()` call and put back before the output is read again. `lexLines()` skips a whole placeholder when the option is on, so neither a `#` that opens one nor a quote or `--` sitting inside it is taken for SQL; a `{{ ... }}` that runs over several lines marks the lines it covers as spanning, which keeps them from being joined.
+sql-formatter settles where a line comment starts before it looks at `paramTypes`, so in the MySQL family (where `#` opens a comment) `#{id}` would swallow the rest of the line whatever `paramTypes` says. The `#` of `#{` is therefore swapped for `HASH_SENTINEL` (`\u0001`, which no dialect gives a meaning to) for the duration of the `format()` call and put back before the output is read again. Two limits come with that swap:
+
+- Putting the sentinel back rewrites *every* `\u0001` to `#`, so SQL that already holds one (it is a common field delimiter and does appear inside string literals) is not masked at all. Such SQL keeps sql-formatter's own reading of `#`, which in the MySQL family means a `#{...}` in it is still read as a comment.
+- Only a `#{...}` that closes on its own line is masked, so a MySQL comment starting with an unclosed `#{` stays the comment it is rather than becoming a parse error. A `#{...}` that *does* close is treated as a placeholder even where the dialect would have read the whole line as a comment — with the option on, that is what the user is asking for.
+
+`lexLines()` skips a whole placeholder when the option is on, so neither a `#` that opens one nor a quote or `--` sitting inside it is taken for SQL; a `{{ ... }}` that runs over several lines marks the lines it covers as spanning, which keeps them from being joined.
 
 ### i18n
 

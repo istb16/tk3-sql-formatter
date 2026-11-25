@@ -507,6 +507,22 @@ describe('formatSql', () => {
       expect(formatSql(MYBATIS_SQL, ON)).not.toContain('\u0001');
     });
 
+    it('keeps a sentinel character the SQL itself contains', () => {
+      // #{ のマスクを戻す処理は U+0001 をすべて # にするので、もともと SQL に
+      // 入っていた U+0001 まで書き換えてはいけない。Hive などの区切り文字で
+      // 文字列リテラルに実際に現れる。
+      const ddl = "CREATE TABLE t (a STRING) ROW FORMAT DELIMITED FIELDS TERMINATED BY '\u0001'";
+      expect(formatSql(ddl, ON)).toContain("'\u0001'");
+      expect(formatSql("SELECT '\u0001' AS a, b FROM t", ON)).toContain("'\u0001'");
+    });
+
+    it('leaves a MySQL # comment that never closes its brace alone', () => {
+      // #{ を必ずマスクすると、閉じない #{ を持つ行コメントが構文エラーになる。
+      const sql = 'SELECT a FROM t #{unclosed note';
+      expect(() => formatSql(sql, ON)).not.toThrow();
+      expect(formatSql(sql, ON)).toContain('#{unclosed note');
+    });
+
     it('formats its own output to the same thing', () => {
       for (const sql of [DBT_SQL, MYBATIS_SQL]) {
         const once = formatSql(sql, ON);

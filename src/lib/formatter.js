@@ -64,7 +64,7 @@ function syntaxFor(language, templates) {
 const TEMPLATE_PARAM_TYPES = {
   custom: [
     { regex: String.raw`\{\{[\s\S]*?\}\}` },
-    { regex: String.raw`[#$\u0001]\{[^{}]*\}` },
+    { regex: String.raw`[#$\u0001]\{[^{}\n]*\}` },
   ],
 };
 
@@ -77,16 +77,27 @@ const TEMPLATE_PARAM_TYPES = {
  */
 const HASH_SENTINEL = '\u0001';
 
+/**
+ * Only a `#{...}` that closes on its own line is masked, so a MySQL comment
+ * that happens to start with `#{` and never closes it (`#{todo: ask about
+ * this`) keeps being read as the comment it is instead of becoming a parse
+ * error. A `#{...}` that does close is a placeholder as far as this
+ * option is concerned, even where the dialect would have read the whole line
+ * as a comment — that is what turning the option on asks for.
+ */
 function maskHashParams(sql) {
-  return sql.replace(/#\{/g, `${HASH_SENTINEL}{`);
+  return sql.replace(/#(\{[^{}\n]*\})/g, `${HASH_SENTINEL}$1`);
 }
 
 function unmaskHashParams(sql) {
   return sql.replaceAll(HASH_SENTINEL, '#');
 }
 
-/** A MyBatis `#{...}` / `${...}` parameter at the start of the given text. */
-const TEMPLATE_PARAM = /^[#$]\{[^{}]*\}/;
+/**
+ * A MyBatis `#{...}` / `${...}` parameter at `lastIndex`. Sticky so that
+ * `lexLines` can try it at each position without slicing the line.
+ */
+const TEMPLATE_PARAM = /[#$]\{[^{}]*\}/y;
 
 /** Whether the quote at `line[i]` opens a string that takes backslash escapes. */
 function takesBackslash(line, i, syntax) {
@@ -159,8 +170,11 @@ function lexLines(lines, syntax) {
           i = end + 2;
           continue;
         }
-        const param = TEMPLATE_PARAM.exec(line.slice(i));
-        if (param) { i += param[0].length; continue; }
+        if (line[i] === '#' || line[i] === '$') {
+          TEMPLATE_PARAM.lastIndex = i;
+          const param = TEMPLATE_PARAM.exec(line);
+          if (param) { i += param[0].length; continue; }
+        }
       }
 
       if (syntax.lineComments.some((p) => line.startsWith(p, i))) { comment = true; break; }
@@ -348,10 +362,22 @@ function render(node, out, opts) {
  */
 export function formatSql(sql, opts) {
   const { compactLists, ignoreTemplates, ...fmtOpts } = opts;
-  if (ignoreTemplates) fmtOpts.paramTypes = TEMPLATE_PARAM_TYPES;
-  const result = ignoreTemplates
-    ? unmaskHashParams(format(maskHashParams(sql), fmtOpts))
-    : format(sql, fmtOpts);
+
+  let result;
+  if (!ignoreTemplates) {
+    result = format(sql, fmtOpts);
+  } else {
+    fmtOpts.paramTypes = TEMPLATE_PARAM_TYPES;
+    // Unmasking puts every sentinel character back as `#`, so SQL that already
+    // holds one of its own (U+0001 is a common field delimiter and does turn up
+    // inside string literals) must not be masked at all — it would come back
+    // with that character silently rewritten. Such SQL keeps sql-formatter's
+    // own reading of `#`, which in the MySQL family means a `#{...}` in it is
+    // still read as a comment.
+    const masked = !sql.includes(HASH_SENTINEL);
+    const formatted = format(masked ? maskHashParams(sql) : sql, fmtOpts);
+    result = masked ? unmaskHashParams(formatted) : formatted;
+  }
 
   const renderOpts = {
     compact: !!compactLists,
