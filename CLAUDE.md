@@ -33,12 +33,20 @@ Settings persist to `localStorage` under the key `sql-formatter-settings`. Input
 
 ### Formatting pipeline
 
-`doFormat()` in `App.svelte` delegates to `formatSql()` in `src/lib/formatter.js`, which calls `sql-formatter`'s `format()` then optionally applies a two-step post-processing pipeline when **Compact mode** (`compactLists`) is enabled:
+`doFormat()` in `App.svelte` delegates to `formatSql()` in `src/lib/formatter.js`, which calls `sql-formatter`'s `format()` and then post-processes the result.
 
-1. `collapseParenBlocks(sql)` — Collapses multi-line `(...)` blocks that contain no nested parens and no subqueries. Runs in a loop until stable. This fixes `EXTRACT(YEAR FROM date)` being expanded by sql-formatter (which treats `FROM` as a keyword).
-2. `joinCompactLists(sql)` — Pulls keyword lines (SELECT, FROM, WHERE, etc.) and their indented children onto one line when the children form a comma list, AND/OR chain, or are a single item. Guards against collapsing subquery bodies.
+sql-formatter encodes the block structure of a statement in its indentation, so `parseTree()` parses the output back into a tree of lines: a node owns the lines indented deeper than itself, plus the closing line that follows them at its own indent (`)` or `END`). `render()` then walks the tree and decides per node whether to join it onto one line or leave it expanded. Because a node is only ever joined as a whole, a block's opening line, body and closing line always move together, and an inner block is considered even when the block around it stays expanded.
 
-When `compactLists` is on, `expressionWidth` is set to `9999` on the sql-formatter call to suppress its own wrapping before the custom pipeline runs.
+A node is joined when:
+
+- **Compact mode** (`compactLists`) is on and the joined line, indent included, fits within `expressionWidth`. Long lines that sql-formatter itself could not split are left alone.
+- Or the node is a function call that sql-formatter broke on a keyword that only looks like a clause (`EXTRACT(YEAR FROM d)`, `SUBSTRING(s FROM 1 FOR 2)`, `CAST(x AS INT)`, `POSITION(a IN b)`), and the argument list itself fits within `expressionWidth`. These are rejoined in both modes. Only the argument list is measured, not the indent or the rest of the line, so a short call is kept together however deeply it sits — the resulting line may then be wider than `expressionWidth` — while a genuinely long one keeps the wrapping sql-formatter chose for it.
+
+Widths are counted in display columns: a tab in the indent counts as `tabWidth` columns, and a full-width (East Asian Wide) character such as a kanji counts as two.
+
+A node is never joined when its lines contain a line comment, a line that belongs to a multi-line string literal or block comment, or a CTE opener (`name AS (`) — CTE bodies stay expanded whatever the width. `lexLines()` lexes the whole sql-formatter output in one pass, carrying the in-string / in-comment state across lines, so the middle lines of a long literal (which contain no quote of their own) are recognised too. It knows `'`, `"`, `` ` ``, dollar-quoted strings (`$$…$$` in `postgresql`/`snowflake`/`clickhouse`, `$tag$…$tag$` in `postgresql`), backslash escapes where the dialect has them (MySQL family, Snowflake `'…'`, PostgreSQL `E'…'`) and nested block comments (`postgresql`, `transactsql`).
+
+The line-comment prefixes are per dialect, following sql-formatter's `lineCommentTypes` (the `SYNTAX` table in `formatter.js`): `--` everywhere, `#` in `mysql`, `mariadb`, `tidb`, `singlestoredb`, `bigquery`, `clickhouse`, `n1ql`, and `//` in `snowflake`. `#` must not be treated as a comment elsewhere because PostgreSQL uses `#>` and `#>>` as JSON operators.
 
 ### i18n
 
