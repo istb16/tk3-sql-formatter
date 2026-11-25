@@ -6,6 +6,14 @@ export const TRANSLATIONS = {
     clear:             'クリア',
     format:            '整形',
     dialect:           'ダイアレクト',
+    dialectLabel_sql:            '標準 SQL',
+    dialectGroup_standard:       '標準',
+    dialectGroup_mysqlFamily:    'MySQL 系',
+    dialectGroup_postgresFamily: 'PostgreSQL 系',
+    dialectGroup_enterprise:     'エンタープライズ DB',
+    dialectGroup_warehouse:      'データウェアハウス',
+    dialectGroup_analytics:      '分析・ビッグデータ',
+    dialectGroup_embedded:       '組み込み・その他',
     indent:            'インデント',
     indentStyle:       'スタイル',
     tabWidth:          'タブ幅',
@@ -44,6 +52,14 @@ export const TRANSLATIONS = {
     clear:             'Clear',
     format:            'Format',
     dialect:           'Dialect',
+    dialectLabel_sql:            'Standard SQL',
+    dialectGroup_standard:       'Standard',
+    dialectGroup_mysqlFamily:    'MySQL family',
+    dialectGroup_postgresFamily: 'PostgreSQL family',
+    dialectGroup_enterprise:     'Enterprise databases',
+    dialectGroup_warehouse:      'Data warehouses',
+    dialectGroup_analytics:      'Analytics & big data',
+    dialectGroup_embedded:       'Embedded & other',
     indent:            'Indent',
     indentStyle:       'Style',
     tabWidth:          'Tab Width',
@@ -76,3 +92,16 @@ export const TRANSLATIONS = {
     errorPrefix:       'Error: ',
   },
 };
+
+/** The translated name of a dialect group (`DIALECT_GROUPS[].key`). */
+export function groupLabel(t, key) {
+  return t[`dialectGroup_${key}`] ?? key;
+}
+
+/**
+ * The name to show for a dialect. Product names are the same in both
+ * languages, so only the dialects with a `dialectLabel_*` entry are translated.
+ */
+export function dialectLabel(t, dialect) {
+  return t[`dialectLabel_${dialect.value}`] ?? dialect.label;
+}
