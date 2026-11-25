@@ -233,5 +233,63 @@ describe('formatSql', () => {
       expect(result).toMatch(/--.*\n/);
       expect(result.split('\n').filter((l) => /--/.test(l))).toHaveLength(1);
     });
+
+    it('does not join across a # comment in MySQL', () => {
+      // `#` はコメントなので、連結すると後ろの列がコメントの中に消える。
+      const result = formatSql('SELECT id, # 主キー\n name FROM users WHERE id = 1', {
+        language: 'mysql', keywordCase: 'upper', expressionWidth: 60, compactLists: true,
+      });
+      expect(result).toContain('name');
+      expect(result.split('\n').find((l) => l.includes('#'))).not.toMatch(/name/);
+    });
+
+    it('treats # as an operator outside MySQL', () => {
+      // PostgreSQL の #>> は演算子なので、これを理由に連結を止めてはいけない。
+      const result = formatSql("SELECT id, payload #>> '{a,b}' AS v FROM events", {
+        ...PG, compactLists: true,
+      });
+      expect(result.split('\n')[0]).toBe("SELECT id, payload #>> '{a,b}' AS v");
+    });
+
+    it('keeps a block comment that spans lines on its own lines', () => {
+      const result = formatSql('SELECT a, /* これは\n   複数行の\n   コメント */ b FROM t', {
+        ...PG, compactLists: true,
+      });
+      expect(result).toContain('/* これは\n');
+      expect(result.split('\n').filter((l) => /これは|複数行の|コメント/.test(l))).toHaveLength(3);
+    });
+
+    it('leaves a long argument list wrapped as sql-formatter wrapped it', () => {
+      // 節キーワードでの分割を戻すのは、引数そのものが幅に収まるときだけ。
+      const result = formatSql(
+        "SELECT GROUP_CONCAT(DISTINCT some_quite_long_column_name ORDER BY another_quite_long_column_name SEPARATOR ', ') FROM t",
+        { language: 'mysql', keywordCase: 'preserve', expressionWidth: 50, compactLists: false }
+      );
+      expect(result).not.toContain('GROUP_CONCAT(DISTINCT');
+      expect(Math.max(...result.split('\n').map((l) => l.length))).toBeLessThan(60);
+    });
+
+    it('rejoins a short function call however deeply it sits', () => {
+      const result = formatSql(
+        "SELECT * FROM orders WHERE customer_id IN (SELECT id FROM customers WHERE country IN ('JP', 'US') AND created_at < EXTRACT(YEAR FROM CURRENT_DATE))",
+        { ...PG, compactLists: false }
+      );
+      expect(result).toContain('EXTRACT(YEAR FROM CURRENT_DATE)');
+    });
+
+    it('measures a tab indent by the columns it takes up', () => {
+      const sql =
+        'SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.id = t.id AND u.flag' +
+        ' AND EXISTS (SELECT 1 FROM v WHERE v.id = u.id AND v.x = 1))';
+      const result = formatSql(sql, {
+        ...PG, compactLists: true, useTabs: true, tabWidth: 8,
+      });
+      // タブ 5 段は 40 桁ぶんあるので、29 文字のこの行は幅 50 に収まらない。
+      // 字数で数えていたときは 5 + 29 = 34 と判定して連結してしまっていた。
+      expect(result).not.toContain('WHERE v.id = u.id AND v.x = 1');
+      // 同じ深さでも、タブを使わなければ 5 + 29 = 34 桁なので連結する。
+      const spaces = formatSql(sql, { ...PG, compactLists: true, tabWidth: 1 });
+      expect(spaces).toContain('WHERE v.id = u.id AND v.x = 1');
+    });
   });
 });

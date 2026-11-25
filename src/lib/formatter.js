@@ -12,8 +12,14 @@ import { format } from 'sql-formatter';
  * line always move together.
  */
 
-/** Scans a line and reports the offset of a `--` comment outside string literals. */
-function lineCommentAt(line) {
+/**
+ * Dialects where `#` starts a line comment. Everywhere else `#` is an operator
+ * (PostgreSQL's `#>` / `#>>`), so it must not be mistaken for a comment.
+ */
+const HASH_COMMENT_LANGUAGES = new Set(['mysql', 'mariadb', 'tidb', 'singlestoredb']);
+
+/** True when a line carries a comment that runs to the end of the line. */
+function hasLineComment(line, hashComments) {
   let quote = null;
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
@@ -22,9 +28,35 @@ function lineCommentAt(line) {
       continue;
     }
     if (ch === "'" || ch === '"' || ch === '`') { quote = ch; continue; }
-    if (ch === '-' && line[i + 1] === '-') return i;
+    if (ch === '-' && line[i + 1] === '-') return true;
+    if (ch === '#' && hashComments) return true;
   }
-  return -1;
+  return false;
+}
+
+/**
+ * True when a line is part of a block comment that spans several lines, either
+ * because it opens one it does not close or because it closes one opened
+ * earlier. Joining those lines would flatten the comment's own layout.
+ */
+function spansBlockComment(line) {
+  let quote = null;
+  let open = 0;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (open > 0) {
+      if (ch === '*' && line[i + 1] === '/') { open--; i++; }
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') { quote = ch; continue; }
+    if (ch === '/' && line[i + 1] === '*') { open++; i++; continue; }
+    if (ch === '*' && line[i + 1] === '/') return true;
+  }
+  return open > 0;
 }
 
 /** True when a line leaves a string literal open (a literal spanning lines). */
@@ -113,13 +145,15 @@ function flatten(node) {
 
 /**
  * Whether a subtree may be joined onto one line at all.
- * Line comments would swallow everything after them, a string literal spanning
- * lines would change the text, and a CTE body is always kept expanded.
+ * A line comment would swallow everything after it, a string literal or a block
+ * comment spanning lines would lose its layout, and a CTE body is always kept
+ * expanded.
  */
-function isJoinable(node) {
+function isJoinable(node, opts) {
   for (const line of subtreeLines(node)) {
-    if (lineCommentAt(line) !== -1) return false;
+    if (hasLineComment(line, opts.hashComments)) return false;
     if (hasOpenQuote(line)) return false;
+    if (spansBlockComment(line)) return false;
     if (CTE_OPENER.test(line)) return false;
   }
   return true;
@@ -129,27 +163,44 @@ function hasSelect(node) {
   return subtreeLines(node).some(line => /\bSELECT\b/i.test(line));
 }
 
-function render(node, out, compact, maxWidth) {
+/** The argument list of a node that opens a function call, joined onto one line. */
+function joinedArguments(node) {
+  const parts = node.children.map(flatten);
+  if (node.closer) parts.push(node.closer.text);
+  return joinParts(parts);
+}
+
+/** How many columns an indent takes up on screen, with tabs expanded. */
+function indentColumns(indent, tabWidth) {
+  return indent.replace(/\t/g, ' '.repeat(tabWidth)).length;
+}
+
+function render(node, out, opts) {
   if (node.blank) { out.push(node.raw); return; }
   if (!node.children.length && !node.closer) { out.push(node.raw); return; }
 
-  if (isJoinable(node)) {
+  if (isJoinable(node, opts)) {
     const indent = node.raw.slice(0, node.indent);
+    const columns = indentColumns(indent, opts.tabWidth);
     const joined = flatten(node);
     // A function call broken on a keyword that only looks like a clause is put
-    // back together whatever the mode.
+    // back together whatever the mode, as long as the argument list itself fits
+    // the width. Measuring the arguments rather than the whole line keeps
+    // EXTRACT(YEAR FROM d) together however deeply it sits, while a genuinely
+    // long argument list keeps the wrapping sql-formatter chose for it.
     const brokenOnArgKeyword =
       FUNCTION_CALL.test(node.text) &&
       !hasSelect(node) &&
-      node.children.some(child => ARG_KEYWORD.test(child.text));
-    if (brokenOnArgKeyword || (compact && indent.length + joined.length <= maxWidth)) {
+      node.children.some(child => ARG_KEYWORD.test(child.text)) &&
+      joinedArguments(node).length <= opts.maxWidth;
+    if (brokenOnArgKeyword || (opts.compact && columns + joined.length <= opts.maxWidth)) {
       out.push(indent + joined);
       return;
     }
   }
 
   out.push(node.raw);
-  for (const child of node.children) render(child, out, compact, maxWidth);
+  for (const child of node.children) render(child, out, opts);
   if (node.closer) out.push(node.closer.raw);
 }
 
@@ -161,12 +212,18 @@ function render(node, out, compact, maxWidth) {
  */
 export function formatSql(sql, opts) {
   const { compactLists, ...fmtOpts } = opts;
-  const maxWidth = fmtOpts.expressionWidth ?? 50;
   const result = format(sql, fmtOpts);
+
+  const renderOpts = {
+    compact: !!compactLists,
+    maxWidth: fmtOpts.expressionWidth ?? 50,
+    tabWidth: fmtOpts.tabWidth ?? 2,
+    hashComments: HASH_COMMENT_LANGUAGES.has(fmtOpts.language),
+  };
 
   const out = [];
   for (const node of parseTree(result.split('\n')).children) {
-    render(node, out, !!compactLists, maxWidth);
+    render(node, out, renderOpts);
   }
   return out.join('\n');
 }

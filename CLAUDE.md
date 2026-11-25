@@ -40,9 +40,11 @@ sql-formatter encodes the block structure of a statement in its indentation, so 
 A node is joined when:
 
 - **Compact mode** (`compactLists`) is on and the joined line fits within `expressionWidth` — this is the only thing that decides where a line ends, so no joined line can exceed the width. Long lines that sql-formatter itself could not split are left alone.
-- Or the node is a function call that sql-formatter broke on a keyword that only looks like a clause (`EXTRACT(YEAR FROM d)`, `SUBSTRING(s FROM 1 FOR 2)`, `CAST(x AS INT)`, `POSITION(a IN b)`). These are rejoined in both modes.
+- Or the node is a function call that sql-formatter broke on a keyword that only looks like a clause (`EXTRACT(YEAR FROM d)`, `SUBSTRING(s FROM 1 FOR 2)`, `CAST(x AS INT)`, `POSITION(a IN b)`), and the argument list itself fits within `expressionWidth`. These are rejoined in both modes. The argument list is measured rather than the whole line, so a short call is kept together however deeply it sits, while a genuinely long one keeps the wrapping sql-formatter chose for it.
 
-A node is never joined when its lines contain a `--` comment (joining would comment out the rest), a string literal spanning lines, or a CTE opener (`name AS (`) — CTE bodies stay expanded whatever the width.
+Widths are counted in display columns: a tab in the indent counts as `tabWidth` columns, not one character.
+
+A node is never joined when its lines contain a line comment, a string literal or a block comment spanning lines, or a CTE opener (`name AS (`) — CTE bodies stay expanded whatever the width. A line comment is `--` everywhere, plus `#` in the MySQL family (`mysql`, `mariadb`, `tidb`, `singlestoredb`); `#` must not be treated as a comment elsewhere because PostgreSQL uses `#>` and `#>>` as JSON operators.
 
 ### i18n
 
