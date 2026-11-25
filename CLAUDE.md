@@ -33,7 +33,14 @@ Settings persist to `localStorage` under the key `sql-formatter-settings`. Input
 
 ### Formatting pipeline
 
-`doFormat()` in `App.svelte` delegates to `formatSql()` in `src/lib/formatter.js`, which calls `sql-formatter`'s `format()` and then post-processes the result.
+`doFormat()` in `App.svelte` delegates to `formatSql()` in `src/lib/formatter.js`, which calls `sql-formatter`'s `format()` and then post-processes the result. `formatter.js` only wires the steps together; each one lives in its own module:
+
+| Module | What it owns |
+|--------|--------------|
+| `src/lib/dialect-syntax.js` | The `SYNTAX` table — what a literal or comment looks like in each dialect — and `syntaxFor()` |
+| `src/lib/templates.js` | `maskTemplates()` / `unmaskTemplates()` / `templateParamTypes()` for `ignoreTemplates` |
+| `src/lib/sql-lexer.js` | `lexLines()`, which marks the lines that must be left alone |
+| `src/lib/line-tree.js` | `parseTree()` and `render()` — the tree and the join decision |
 
 sql-formatter encodes the block structure of a statement in its indentation, so `parseTree()` parses the output back into a tree of lines: a node owns the lines indented deeper than itself, plus the closing line that follows them at its own indent (`)` or `END`). `render()` then walks the tree and decides per node whether to join it onto one line or leave it expanded. Because a node is only ever joined as a whole, a block's opening line, body and closing line always move together, and an inner block is considered even when the block around it stays expanded.
 
@@ -46,7 +53,7 @@ Widths are counted in display columns: a tab in the indent counts as `tabWidth` 
 
 A node is never joined when its lines contain a line comment, a line that belongs to a multi-line string literal, quoted identifier or block comment, or a CTE opener (`name AS (`) — CTE bodies stay expanded whatever the width. `lexLines()` lexes the whole sql-formatter output in one pass, carrying the in-string / in-comment state across lines, so the middle lines of a long literal (which contain no quote of their own) are recognised too. It knows `'`, `"`, `` ` ``, bracketed identifiers (`[…]` with `]]` as an escaped `]`, in `sqlite`/`transactsql`), BigQuery's triple quotes (`'''…'''`, `"""…"""`), dollar-quoted strings (`$$…$$` in `postgresql`/`snowflake`/`clickhouse`/`duckdb`, `$tag$…$tag$` in `postgresql`/`clickhouse`/`duckdb` — Snowflake takes no tag because `$name` is a variable there), backslash escapes where the dialect has them (MySQL family, `bigquery`, `hive`, `spark`, `sql`, Snowflake `'…'`, `E'…'` in `postgresql`/`duckdb`), raw strings in which a backslash escapes nothing (`R`/`B`/`RB`/`BR` prefixes in `bigquery`, `R`/`X` in `spark`, both on `'` and `"`; the hex and bit strings `X'…'` in `sql` and `B'…'`/`X'…'` in the MySQL family, on `'` only — `rawPrefixes` is keyed by quote character; BigQuery's triple-quoted raw strings still take escapes, as in sql-formatter), Oracle's `q'[…]'` strings in `plsql` (`qStrings`: delimiter pair `[]`/`()`/`{}`/`<>` or any other non-space character on both sides, a `'` inside does not close it; like sql-formatter, it only counts when it closes on the same line) and nested block comments (`postgresql`, `transactsql`, `db2i`, `duckdb`). The dialects needing none of this are left out of `SYNTAX` and take `DEFAULT_SYNTAX`. `formatter.test.js` keeps the table honest without restating it: for each feature it probes sql-formatter itself with a snippet that only survives where the dialect has the feature, then asserts `formatSql()` gets that dialect right — so a dialect added to `DIALECTS` without its `SYNTAX` entry fails there rather than silently taking the defaults. Most features are also checked in the other direction (`withoutIt`: a snippet that parses where the dialect lacks the feature and that the feature would misread — a literal ending in `\`, `R'it\'s--x'`, `$a$x`, `m['k]']`, `q'+it's+'--x'`), since switching one on where it does not belong leaves a string open or ends one early for the lexer. Some rules cannot be observed through `formatSql()` because sql-formatter's output never produces the input they guard against: it writes a non-prefix identifier apart from the following string (`abr 'x'`, MySQL `X "x"`) and splits `$1$2` into `$1 $2`, so the raw-prefix boundary, the quote restriction on MySQL's raw prefixes and the digit rule of `TAGGED_DOLLAR` are kept for safety but no test fails if they are loosened.
 
-The line-comment prefixes are per dialect, following sql-formatter's `lineCommentTypes` (the `SYNTAX` table in `formatter.js`): `--` everywhere, `#` in `mysql`, `mariadb`, `tidb`, `singlestoredb`, `bigquery`, `clickhouse`, `n1ql`, and `//` in `snowflake`. `#` must not be treated as a comment elsewhere because PostgreSQL uses `#>` and `#>>` as JSON operators.
+The line-comment prefixes are per dialect, following sql-formatter's `lineCommentTypes` (the `SYNTAX` table in `dialect-syntax.js`): `--` everywhere, `#` in `mysql`, `mariadb`, `tidb`, `singlestoredb`, `bigquery`, `clickhouse`, `n1ql`, and `//` in `snowflake`. `#` must not be treated as a comment elsewhere because PostgreSQL uses `#>` and `#>>` as JSON operators.
 
 ### Template placeholders
 
@@ -91,7 +98,11 @@ Only a few dialects have their own `SAMPLE_SQL`; `sampleFor()` falls back to the
 | `src/lib/i18n.js` | `TRANSLATIONS` constant (ja/en) |
 | `src/lib/constants.js` | `DIALECTS` list and `SAMPLE_SQL` per dialect |
 | `src/lib/settings.js` | `loadSettings()` / `saveSettings()` for localStorage |
-| `src/lib/formatter.js` | `formatSql()` + compact-list post-processing pipeline |
+| `src/lib/formatter.js` | `formatSql()` — wires the post-processing pipeline together |
+| `src/lib/dialect-syntax.js` | `SYNTAX` table of each dialect's literals and comments, and `syntaxFor()` |
+| `src/lib/sql-lexer.js` | `lexLines()` — marks the lines a join must not touch |
+| `src/lib/templates.js` | Masking and restoring template placeholders (`ignoreTemplates`) |
+| `src/lib/line-tree.js` | `parseTree()` / `render()` — the line tree and the join decision |
 | `src/lib/ToggleSwitch.svelte` | Reusable toggle switch component used in the header |
 | `src/tk-base.css` | Shared tk3 apps design base (color tokens for light/dark, header, footer, buttons). Unmodified copy of the canonical file in tk3-biz-html — never edit it here |
 | `src/app.css` | Tailwind import, Tailwind colors mapped to the `--tk-*` tokens, accent (`--tk-blue`), base resets |
