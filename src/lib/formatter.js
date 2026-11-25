@@ -22,20 +22,29 @@ import { format } from 'sql-formatter';
  *   operator (PostgreSQL's `#>` / `#>>`) and must not be mistaken for one.
  * - `backslash`: quote characters whose strings take backslash escapes
  *   (`'O\'Brien'`).
- * - `eStrings`: `E'...'` strings take backslash escapes (PostgreSQL).
+ * - `eStrings`: `E'...'` strings take backslash escapes (PostgreSQL, DuckDB).
+ * - `tripleQuotes`: `'''...'''` and `"""..."""` open a string that commonly
+ *   runs over several lines (BigQuery).
  * - `dollar`: how a dollar-quoted string opens (`$$ ... $$`, `$tag$ ... $tag$`).
  * - `nestedBlockComments`: a block comment opened inside a block comment must
  *   be closed before the outer one is.
+ *
+ * The dialects that need none of this (db2, plsql, redshift, sqlite, trino)
+ * are left out and take `DEFAULT_SYNTAX`.
  */
 const HASH_COMMENTS = ['--', '#'];
+const BACKSLASH_SYNTAX = { backslash: `'"` };
 const MYSQL_SYNTAX = { lineComments: HASH_COMMENTS, backslash: `'"` };
 const SYNTAX = {
+  sql: { backslash: "'" },
   mysql: MYSQL_SYNTAX,
   mariadb: MYSQL_SYNTAX,
   tidb: MYSQL_SYNTAX,
   singlestoredb: MYSQL_SYNTAX,
-  bigquery: MYSQL_SYNTAX,
   n1ql: MYSQL_SYNTAX,
+  bigquery: { lineComments: HASH_COMMENTS, backslash: `'"`, tripleQuotes: true },
+  hive: BACKSLASH_SYNTAX,
+  spark: BACKSLASH_SYNTAX,
   clickhouse: { lineComments: HASH_COMMENTS, backslash: `'"`, dollar: /^\$\$/ },
   snowflake: { lineComments: ['--', '//'], backslash: "'", dollar: /^\$\$/ },
   postgresql: {
@@ -43,7 +52,9 @@ const SYNTAX = {
     dollar: /^\$(?:[A-Za-z_\u0080-￿][\w\u0080-￿]*)?\$/,
     nestedBlockComments: true,
   },
+  duckdb: { eStrings: true, dollar: /^\$\$/, nestedBlockComments: true },
   transactsql: { nestedBlockComments: true },
+  db2i: { nestedBlockComments: true },
 };
 const DEFAULT_SYNTAX = { lineComments: ['--'], backslash: '' };
 
@@ -76,6 +87,7 @@ function takesBackslash(line, i, syntax) {
  */
 function lexLines(lines, syntax) {
   // null, or { quote, backslash }, { dollar }, { block: depth }
+  // `quote` is the closing delimiter, one character or a triple quote.
   let state = null;
   return lines.map((line) => {
     const startsInside = state !== null;
@@ -85,7 +97,7 @@ function lexLines(lines, syntax) {
       if (state?.quote) {
         if (state.backslash && line[i] === '\\') { i += 2; continue; }
         // A doubled quote ('it''s') closes and reopens, which ends the same way.
-        if (line[i] === state.quote) state = null;
+        if (line.startsWith(state.quote, i)) { i += state.quote.length; state = null; continue; }
         i++;
         continue;
       }
@@ -108,8 +120,12 @@ function lexLines(lines, syntax) {
       if (line.startsWith('/*', i)) { state = { block: 1 }; i += 2; continue; }
       const ch = line[i];
       if (ch === "'" || ch === '"' || ch === '`') {
-        state = { quote: ch, backslash: takesBackslash(line, i, syntax) };
-        i++;
+        // A triple quote has to be recognised before the single one, or its
+        // first two quotes read as an empty string.
+        const triple = syntax.tripleQuotes && ch !== '`' && line.startsWith(ch.repeat(3), i);
+        const quote = triple ? ch.repeat(3) : ch;
+        state = { quote, backslash: takesBackslash(line, i, syntax) };
+        i += quote.length;
         continue;
       }
       if (ch === '$' && syntax.dollar && !/[\w$]/.test(line[i - 1] ?? '')) {

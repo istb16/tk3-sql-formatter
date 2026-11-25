@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { formatSql } from './formatter.js';
+import { DIALECTS } from './constants.js';
 
 const MYSQL = { language: 'mysql', compactLists: false };
 const COMPACT = { language: 'mysql', compactLists: true, keywordCase: 'upper' };
@@ -28,13 +29,6 @@ describe('formatSql', () => {
     expect(result).toContain('from');
     expect(result).not.toContain('SELECT');
   });
-
-  it.each(['mysql', 'postgresql', 'snowflake', 'plsql', 'transactsql'])(
-    'does not throw for dialect %s',
-    (language) => {
-      expect(() => formatSql('SELECT 1', { language, compactLists: false })).not.toThrow();
-    }
-  );
 
   it('preserves Oracle named bind variables', () => {
     const result = formatSql(
@@ -443,6 +437,113 @@ describe('formatSql', () => {
       const commentLine = lines.find((l) => l.includes('--'));
       expect(commentLine.trim()).toBe("'O\\'Brien' AS a, -- c");
       expect(lines.slice(lines.indexOf(commentLine) + 1).some((l) => l.trim() === 'b')).toBe(true);
+    });
+  });
+
+  describe('per-dialect lexing', () => {
+    const BASE = { keywordCase: 'upper', expressionWidth: 60, compactLists: true };
+    const opts = (language) => ({ ...BASE, language });
+
+    /** `b` が連結されずに次の行に残っていること = コメントが認識されていること。 */
+    const stopsAtComment = (result, comment) => {
+      const lines = result.split('\n');
+      const commentLine = lines.find((l) => l.includes(comment));
+      expect(commentLine, `no ${comment} comment in:\n${result}`).toBeDefined();
+      expect(commentLine).not.toMatch(/\bb\b\s*$/);
+      expect(lines.slice(lines.indexOf(commentLine) + 1).some((l) => l.trim() === 'b')).toBe(true);
+    };
+
+    it.each(DIALECTS.map((d) => d.value))('does not throw for dialect %s', (language) => {
+      expect(() => formatSql('SELECT 1', { language, compactLists: false })).not.toThrow();
+    });
+
+    it.each([
+      ['mysql', '#'],
+      ['mariadb', '#'],
+      ['tidb', '#'],
+      ['singlestoredb', '#'],
+      ['bigquery', '#'],
+      ['clickhouse', '#'],
+      ['n1ql', '#'],
+      ['snowflake', '//'],
+      ['sql', '--'],
+      ['trino', '--'],
+    ])('reads %s as a line comment in %s', (language, comment) => {
+      stopsAtComment(formatSql(`SELECT a, ${comment} c\n b FROM t`, opts(language)), comment);
+    });
+
+    it('does not read # as a comment in PostgreSQL', () => {
+      // PostgreSQL の #> は JSON 演算子なので、コメントとして扱ってはいけない。
+      const result = formatSql("SELECT doc #> '{a}' AS a, b FROM t", opts('postgresql'));
+      expect(result.split('\n')[0]).toBe("SELECT doc #> '{a}' AS a, b");
+    });
+
+    // \' を引用符の終わりと読むと、その後ろの -- が文字列の外に見えてしまい、
+    // 行コメントだと誤認して連結が止まる。1 行に収まることで正しさを確かめる。
+    it.each([
+      ['sql', "'O\\'Brien--x'"],
+      ['spark', "'O\\'Brien--x'"],
+      ['hive', "'O\\'Brien--x'"],
+      ['bigquery', "'O\\'Brien--x'"],
+      ['mysql', "'O\\'Brien--x'"],
+      ['duckdb', "E'O\\'Brien--x'"],
+    ])('honours backslash-escaped quotes in %s', (language, literal) => {
+      const result = formatSql(
+        `SELECT ${literal} AS a, bbbbbbbb, cccccccc FROM t`,
+        opts(language)
+      );
+      expect(result.split('\n')[0]).toBe(`SELECT ${literal} AS a, bbbbbbbb, cccccccc`);
+    });
+
+    it('does not treat a backslash as an escape where the dialect has none', () => {
+      // Trino の '' は \ を escape として扱わないので、そもそも構文エラーになる。
+      expect(() => formatSql("SELECT 'O\\'Brien' AS a FROM t", opts('trino'))).toThrow();
+    });
+
+    it('keeps a dollar-quoted string spanning lines in DuckDB', () => {
+      const literal = '$$hello\n  world$$';
+      const result = formatSql(`SELECT ${literal} AS x, y FROM t`, opts('duckdb'));
+      expect(result).toContain(literal);
+    });
+
+    it.each(['postgresql', 'transactsql', 'db2i', 'duckdb'])(
+      'keeps a nested block comment spanning lines in %s',
+      (language) => {
+        const comment = '/* a\n  /* b */\n  c */';
+        const result = formatSql(`SELECT ${comment} x, y FROM t`, opts(language));
+        expect(result).toContain(comment);
+      }
+    );
+
+    it.each(["'''", '"""'])('keeps a %s string spanning lines in BigQuery', (q) => {
+      const literal = `${q}hello\n  world${q}`;
+      const result = formatSql(`SELECT ${literal} AS x, y FROM t`, opts('bigquery'));
+      expect(result).toContain(literal);
+      expect(result.split('\n').pop()).toBe('FROM t');
+    });
+
+    it('reads a quote inside a triple-quoted BigQuery string as part of it', () => {
+      // ''' を ' が 3 つと読むと、中の ' が引用符の開始に見えて行末まで文字列が続く。
+      const result = formatSql("SELECT '''it's''' AS x, y FROM t", opts('bigquery'));
+      expect(result.split('\n')[0]).toBe("SELECT '''it's''' AS x, y");
+    });
+
+    it('does not mistake an empty string for a triple quote in BigQuery', () => {
+      const result = formatSql("SELECT '' AS x, -- c\n y FROM t", opts('bigquery'));
+      expect(result).toContain("'' AS x, -- c");
+      expect(result.split('\n').some((l) => l.trim() === 'y')).toBe(true);
+    });
+
+    it('formats the BigQuery query from issue #10', () => {
+      const sql =
+        'SELECT a.* FROM `proj.ds.tbl` a\n' +
+        'WHERE DATE(ts) = CURRENT_DATE() AND a.arr[OFFSET(0)] = 1\n' +
+        'QUALIFY ROW_NUMBER() OVER (PARTITION BY a.id ORDER BY ts DESC) = 1';
+      const result = formatSql(sql, opts('bigquery'));
+      expect(result).toContain('`proj.ds.tbl`');
+      expect(result).toContain('QUALIFY');
+      expect(result).toContain('OFFSET(0)');
+      expect(() => formatSql(sql, opts('postgresql'))).toThrow();
     });
   });
 });
