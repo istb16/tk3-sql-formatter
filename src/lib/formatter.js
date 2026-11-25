@@ -1,3 +1,4 @@
+import * as dialects from 'sql-formatter';
 import { format } from 'sql-formatter';
 
 /**
@@ -47,8 +48,8 @@ const SYNTAX = {
 };
 const DEFAULT_SYNTAX = { lineComments: ['--'], backslash: '' };
 
-function syntaxFor(language, templates) {
-  return { ...DEFAULT_SYNTAX, ...SYNTAX[language], templates };
+function syntaxFor(language) {
+  return { ...DEFAULT_SYNTAX, ...SYNTAX[language] };
 }
 
 /**
@@ -57,47 +58,114 @@ function syntaxFor(language, templates) {
  * `${raw}`). Statement blocks such as `{% if %}` are left out on purpose — a
  * statement carrying one is not valid SQL on its own anyway.
  *
- * They are handed to sql-formatter as custom `paramTypes`, so each placeholder
- * becomes a single parameter token: it comes through with its text untouched
- * (no case folding, no re-spacing inside) instead of raising a parse error.
- */
-const TEMPLATE_PARAM_TYPES = {
-  custom: [
-    { regex: String.raw`\{\{[\s\S]*?\}\}` },
-    { regex: String.raw`[#$\u0001]\{[^{}\n]*\}` },
-  ],
-};
-
-/**
- * sql-formatter settles where a line comment starts before it looks at the
- * parameter patterns, and in the MySQL family `#` opens a comment — so `#{id}`
- * would swallow the rest of the line whatever `paramTypes` says. The `#` is
- * therefore swapped for a character no dialect gives a meaning to for the
- * duration of the format call, and put back before the output is read again.
- */
-const HASH_SENTINEL = '\u0001';
-
-/**
- * Only a `#{...}` that closes on its own line is masked, so a MySQL comment
- * that happens to start with `#{` and never closes it (`#{todo: ask about
- * this`) keeps being read as the comment it is instead of becoming a parse
- * error. A `#{...}` that does close is a placeholder as far as this
+ * The template engine runs before the SQL is ever parsed, so a placeholder is
+ * found in the raw text wherever it sits — inside a SQL string literal or a
+ * comment too — and each one is swapped for a mask token before sql-formatter
+ * sees the SQL (see `maskTemplates`). Leaving them to sql-formatter's own
+ * `paramTypes` does not work: it settles strings and line comments first, so a
+ * quote inside `'{{ var('d') }}'` would end the SQL string, and in the MySQL
+ * family the `#` of `#{id}` would open a comment.
+ *
+ * Only a `#{...}` / `${...}` that closes on its own line is a placeholder, so a
+ * MySQL comment that happens to start with `#{` and never closes it (`#{todo:
+ * ask about this`) keeps being read as the comment it is instead of becoming a
+ * parse error. A `#{...}` that does close is a placeholder as far as this
  * option is concerned, even where the dialect would have read the whole line
  * as a comment — that is what turning the option on asks for.
  */
-function maskHashParams(sql) {
-  return sql.replace(/#(\{[^{}\n]*\})/g, `${HASH_SENTINEL}$1`);
-}
+const TEMPLATE_START = /\{\{|[#$]\{[^{}\n]*\}/g;
 
-function unmaskHashParams(sql) {
-  return sql.replaceAll(HASH_SENTINEL, '#');
+/**
+ * Where the Jinja expression opened by the `{{` at `start` ends (the index just
+ * past its `}}`), or -1 when it never closes. A `}}` inside a quoted string or
+ * inside brackets (`{{ var('x', '}}') }}`, `{{ {'a': {'b': 1}} }}`) does not
+ * close it. An expression that never balances falls back to its first `}}`.
+ */
+function jinjaEnd(sql, start) {
+  let depth = 0;
+  let quote = null;
+  for (let i = start + 2; i < sql.length; i++) {
+    const ch = sql[i];
+    if (quote) {
+      if (ch === '\\') i++;
+      else if (ch === quote) quote = null;
+    } else if (ch === "'" || ch === '"') quote = ch;
+    else if ('([{'.includes(ch)) depth++;
+    else if (depth > 0 && ')]}'.includes(ch)) depth--;
+    else if (depth === 0 && sql.startsWith('}}', i)) return i + 2;
+  }
+  const end = sql.indexOf('}}', start + 2);
+  return end === -1 ? -1 : end + 2;
 }
 
 /**
- * A MyBatis `#{...}` / `${...}` parameter at `lastIndex`. Sticky so that
- * `lexLines` can try it at each position without slicing the line.
+ * A character the SQL does not contain, taken from the Private Use Area: no
+ * dialect gives it a meaning and it is not whitespace or a word character, so
+ * sql-formatter never joins it to a neighbouring token.
  */
-const TEMPLATE_PARAM = /[#$]\{[^{}]*\}/y;
+function freeSentinel(sql) {
+  for (let c = 0xe000; c <= 0xf8ff; c++) {
+    const ch = String.fromCharCode(c);
+    if (!sql.includes(ch)) return ch;
+  }
+  return null;
+}
+
+/**
+ * Swaps every placeholder for `<sentinel><index>___<sentinel>`, padded with `_`
+ * to the length of the text it replaces so that sql-formatter's own decisions
+ * on what fits within `expressionWidth` are the same as for the real text.
+ * Returns null when no sentinel is free (the SQL is then formatted as it is).
+ */
+function maskTemplates(sql) {
+  const sentinel = freeSentinel(sql);
+  if (!sentinel) return null;
+  const originals = [];
+  let masked = '';
+  let last = 0;
+  TEMPLATE_START.lastIndex = 0;
+  for (let m; (m = TEMPLATE_START.exec(sql)); ) {
+    const end = m[0] === '{{' ? jinjaEnd(sql, m.index) : m.index + m[0].length;
+    if (end === -1) continue;
+    const text = sql.slice(m.index, end);
+    const id = String(originals.length);
+    masked += sql.slice(last, m.index) + sentinel + id +
+      '_'.repeat(Math.max(0, text.length - id.length - 2)) + sentinel;
+    originals.push(text);
+    last = TEMPLATE_START.lastIndex = end;
+  }
+  masked += sql.slice(last);
+  return { sql: masked, sentinel, originals };
+}
+
+/**
+ * Puts the original placeholders back and reports where each one now sits in
+ * the text, as `[start, end)` offsets, so that `lexLines` can skip exactly the
+ * placeholders that were masked.
+ */
+function unmaskTemplates(text, { sentinel, originals }) {
+  const ranges = [];
+  let out = '';
+  let last = 0;
+  for (const m of text.matchAll(new RegExp(`${sentinel}(\\d+)_*${sentinel}`, 'g'))) {
+    out += text.slice(last, m.index);
+    const original = originals[Number(m[1])];
+    ranges.push([out.length, out.length + original.length]);
+    out += original;
+    last = m.index + m[0].length;
+  }
+  return { text: out + text.slice(last), ranges };
+}
+
+/**
+ * sql-formatter takes `paramTypes` one field at a time, so passing `custom`
+ * replaces the dialect's own custom parameters (ClickHouse `{id:UInt64}`,
+ * SQLite `$name`) instead of adding to them. They are added back here.
+ */
+function templateParamTypes(language, sentinel) {
+  const own = dialects[language ?? 'sql']?.tokenizerOptions?.paramTypes?.custom ?? [];
+  return { custom: [{ regex: `${sentinel}\\d+_*${sentinel}` }, ...own] };
+}
 
 /** Whether the quote at `line[i]` opens a string that takes backslash escapes. */
 function takesBackslash(line, i, syntax) {
@@ -121,15 +189,36 @@ function takesBackslash(line, i, syntax) {
  *
  * The state is carried across lines, so the middle lines of a long literal are
  * recognised even though they contain no quote of their own.
+ *
+ * `templates` are the `[start, end)` offsets, in the lines joined with `\n`, of
+ * the placeholders `maskTemplates` hid from sql-formatter. Each is skipped
+ * whole, wherever it sits, so neither a `#` that opens one nor a quote or a
+ * `--` inside it is taken for SQL; one that runs over several lines leaves
+ * every line it covers marked as spanning, which keeps them from being joined.
  */
-function lexLines(lines, syntax) {
-  // null, or { quote, backslash }, { dollar }, { block: depth }, { template }
+function lexLines(lines, syntax, templates = []) {
+  // null, or { quote, backslash }, { dollar }, { block: depth },
+  // { template: end, outer } (a placeholder inside the `outer` state)
   let state = null;
+  let offset = 0;
+  let next = 0;
   return lines.map((line) => {
     const startsInside = state !== null;
+    const lineEnd = offset + line.length;
     let comment = false;
     let i = 0;
     while (i < line.length) {
+      if (state?.template) {
+        if (state.template > lineEnd) i = line.length;
+        else { i = state.template - offset; state = state.outer; }
+        continue;
+      }
+      while (next < templates.length && templates[next][0] < offset + i) next++;
+      if (templates[next]?.[0] === offset + i) {
+        state = { template: templates[next++][1], outer: state };
+        continue;
+      }
+
       if (state?.quote) {
         if (state.backslash && line[i] === '\\') { i += 2; continue; }
         // A doubled quote ('it''s') closes and reopens, which ends the same way.
@@ -152,32 +241,16 @@ function lexLines(lines, syntax) {
         continue;
       }
 
-      if (state?.template) {
-        const end = line.indexOf('}}', i);
-        if (end === -1) i = line.length;
-        else { i = end + 2; state = null; }
-        continue;
-      }
-
-      // A placeholder is skipped whole, so neither a `#` that opens one nor a
-      // quote or a `--` sitting inside it is taken for SQL. A `{{ ... }}` that
-      // runs over several lines leaves every line it covers marked as spanning,
-      // which keeps them from being joined.
-      if (syntax.templates) {
-        if (line.startsWith('{{', i)) {
-          const end = line.indexOf('}}', i + 2);
-          if (end === -1) { state = { template: true }; i = line.length; continue; }
-          i = end + 2;
-          continue;
+      if (syntax.lineComments.some((p) => line.startsWith(p, i))) {
+        comment = true;
+        // The comment ends with the line, unless a placeholder inside it runs
+        // on past the line end.
+        while (next < templates.length && templates[next][0] < lineEnd) {
+          const [, end] = templates[next++];
+          if (end > lineEnd) state = { template: end, outer: null };
         }
-        if (line[i] === '#' || line[i] === '$') {
-          TEMPLATE_PARAM.lastIndex = i;
-          const param = TEMPLATE_PARAM.exec(line);
-          if (param) { i += param[0].length; continue; }
-        }
+        break;
       }
-
-      if (syntax.lineComments.some((p) => line.startsWith(p, i))) { comment = true; break; }
       if (line.startsWith('/*', i)) { state = { block: 1 }; i += 2; continue; }
       const ch = line[i];
       if (ch === "'" || ch === '"' || ch === '`') {
@@ -191,6 +264,7 @@ function lexLines(lines, syntax) {
       }
       i++;
     }
+    offset = lineEnd + 1;
     return { spans: startsInside || state !== null, comment };
   });
 }
@@ -358,25 +432,19 @@ function render(node, out, opts) {
  * With `compactLists` the lines are joined back together as far as
  * `expressionWidth` allows; without it only function-call arguments are pulled
  * back onto one line. With `ignoreTemplates` the template placeholders listed
- * at `TEMPLATE_PARAM_TYPES` are treated as parameters rather than as SQL.
+ * at `TEMPLATE_START` are treated as parameters rather than as SQL.
  */
 export function formatSql(sql, opts) {
   const { compactLists, ignoreTemplates, ...fmtOpts } = opts;
 
   let result;
-  if (!ignoreTemplates) {
+  let templates = [];
+  const mask = ignoreTemplates ? maskTemplates(sql) : null;
+  if (!mask) {
     result = format(sql, fmtOpts);
   } else {
-    fmtOpts.paramTypes = TEMPLATE_PARAM_TYPES;
-    // Unmasking puts every sentinel character back as `#`, so SQL that already
-    // holds one of its own (U+0001 is a common field delimiter and does turn up
-    // inside string literals) must not be masked at all — it would come back
-    // with that character silently rewritten. Such SQL keeps sql-formatter's
-    // own reading of `#`, which in the MySQL family means a `#{...}` in it is
-    // still read as a comment.
-    const masked = !sql.includes(HASH_SENTINEL);
-    const formatted = format(masked ? maskHashParams(sql) : sql, fmtOpts);
-    result = masked ? unmaskHashParams(formatted) : formatted;
+    fmtOpts.paramTypes = templateParamTypes(fmtOpts.language, mask.sentinel);
+    ({ text: result, ranges: templates } = unmaskTemplates(format(mask.sql, fmtOpts), mask));
   }
 
   const renderOpts = {
@@ -386,7 +454,7 @@ export function formatSql(sql, opts) {
   };
 
   const lines = result.split('\n');
-  const lex = lexLines(lines, syntaxFor(fmtOpts.language, !!ignoreTemplates));
+  const lex = lexLines(lines, syntaxFor(fmtOpts.language), templates);
   const out = [];
   for (const node of parseTree(lines, lex).children) {
     render(node, out, renderOpts);

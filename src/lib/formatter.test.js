@@ -484,15 +484,29 @@ describe('formatSql', () => {
       expect(lines.filter((l) => /^\s*AND\b/.test(l))).toHaveLength(2);
     });
 
-    it.each(['mysql', 'postgresql', 'snowflake', 'plsql', 'transactsql'])(
+    it.each([
+      'mysql', 'postgresql', 'snowflake', 'plsql', 'transactsql',
+      // # が行コメントになる方言。#{ のマスクはこれらのためにある。
+      'mariadb', 'bigquery', 'clickhouse', 'n1ql',
+    ])(
       'keeps MyBatis placeholders intact in dialect %s',
       (language) => {
         const result = formatSql(MYBATIS_SQL, { ...ON, language });
         expect(result).toContain('#{id}');
         expect(result).toContain('#{name}');
         expect(result).toContain('${raw}');
+        // name は方言によってはキーワードとして大文字になるので、大小は問わない。
+        // プレースホルダの中身は上の toContain で一字ずつ確かめている。
+        expect(result.replace(/\s+/g, ' ').trim().toUpperCase()).toBe(
+          'SELECT * FROM T WHERE ID = #{ID} AND NAME LIKE #{NAME} AND K = ${RAW}'
+        );
       }
     );
+
+    it('breaks a MyBatis statement onto several lines in BigQuery too', () => {
+      const lines = formatSql(MYBATIS_SQL, { ...ON, language: 'bigquery' }).split('\n');
+      expect(lines.filter((l) => /^\s*AND\b/.test(l))).toHaveLength(2);
+    });
 
     it('does not fold the case of a placeholder body', () => {
       const result = formatSql(MYBATIS_SQL, {
@@ -504,7 +518,11 @@ describe('formatSql', () => {
     });
 
     it('leaves the sentinel character out of the result', () => {
-      expect(formatSql(MYBATIS_SQL, ON)).not.toContain('\u0001');
+      for (const sql of [MYBATIS_SQL, DBT_SQL]) {
+        const result = formatSql(sql, ON);
+        expect(result).not.toContain('\u0001');
+        expect(result).not.toMatch(/[-]/);
+      }
     });
 
     it('keeps a sentinel character the SQL itself contains', () => {
@@ -516,6 +534,33 @@ describe('formatSql', () => {
       expect(formatSql("SELECT '\u0001' AS a, b FROM t", ON)).toContain("'\u0001'");
     });
 
+    it('masks #{...} even when the SQL already holds U+0001', () => {
+      // 以前は U+0001 を含む SQL ではマスクを諦めていたため、MySQL では #{id}
+      // 以降がコメント扱いになり、AND の改行も止まっていた。
+      const sql = "SELECT '\u0001', a FROM t WHERE x = #{id} AND y = 2";
+      expect(formatSql(sql, ON)).toBe(
+        "SELECT\n  '\u0001',\n  a\nFROM\n  t\nWHERE\n  x = #{id}\n  AND y = 2"
+      );
+    });
+
+    it('does not join SQL onto a #{...} that sql-formatter read as a comment', () => {
+      // sql-formatter と lexLines で #{note} の読み方が食い違うと、閉じ括弧まで
+      // コメントの中に連結される。今は両方ともプレースホルダとして読む。
+      const sql = "SELECT '\u0001' FROM t WHERE (x = 1 #{note}\n AND y=2\n)";
+      const result = formatSql(sql, { ...ON, compactLists: true });
+      expect(result).toBe("SELECT '\u0001'\nFROM t\nWHERE (x = 1 #{note} AND y = 2)");
+      expect(formatSql(result, { ...ON, compactLists: true })).toBe(result);
+    });
+
+    it.each(['mysql', 'postgresql'])(
+      'keeps both U+0001 and a MyBatis placeholder in dialect %s',
+      (language) => {
+        const sql = "SELECT '\u0001', #{id}";
+        expect(() => formatSql(sql, { ...ON, language })).not.toThrow();
+        expect(formatSql(sql, { ...ON, language })).toBe("SELECT\n  '\u0001',\n  #{id}");
+      }
+    );
+
     it('leaves a MySQL # comment that never closes its brace alone', () => {
       // #{ を必ずマスクすると、閉じない #{ を持つ行コメントが構文エラーになる。
       const sql = 'SELECT a FROM t #{unclosed note';
@@ -523,11 +568,90 @@ describe('formatSql', () => {
       expect(formatSql(sql, ON)).toContain('#{unclosed note');
     });
 
-    it('formats its own output to the same thing', () => {
-      for (const sql of [DBT_SQL, MYBATIS_SQL]) {
-        const once = formatSql(sql, ON);
-        expect(formatSql(once, ON)).toBe(once);
+    it('reads an unclosed #{ as a comment without touching a later placeholder', () => {
+      const sql = 'SELECT a FROM t #{open\nWHERE b = #{id}';
+      expect(formatSql(sql, ON)).toBe('SELECT\n  a\nFROM\n  t #{open\nWHERE\n  b = #{id}');
+    });
+
+    it('treats a closed #{...} inside a MySQL # comment as part of the comment', () => {
+      // 閉じた #{x} はプレースホルダとしてマスクされるが、その前の # c が
+      // コメントを始めるので、行末までコメントのまま残る。
+      const sql = 'SELECT a FROM t # c #{x}\nWHERE b = #{id}';
+      expect(formatSql(sql, ON)).toBe('SELECT\n  a\nFROM\n  t # c #{x}\nWHERE\n  b = #{id}');
+    });
+
+    it('treats a closed #{...} as a placeholder even where MySQL reads # as a comment', () => {
+      // オプションを ON にした以上、閉じた #{...} はコメントではなくプレース
+      // ホルダとして扱う（CLAUDE.md に記載の仕様）。
+      expect(formatSql('SELECT a, #{x} FROM t', ON)).toBe('SELECT\n  a,\n  #{x}\nFROM\n  t');
+    });
+
+    it('keeps a {{ ... }} inside a string that uses the same quote', () => {
+      // 外側の文字列と同じ引用符を {{ }} の中で使っても、中身を SQL として
+      // 読んではいけない（以前は var(' START_DATE ') になっていた）。
+      const result = formatSql("SELECT '{{ var('start_date') }}'", {
+        ...ON, language: 'postgresql', identifierCase: 'upper',
+      });
+      expect(result).toBe("SELECT\n  '{{ var('start_date') }}'");
+    });
+
+    it('does not end a {{ ... }} at a }} inside a quote or brackets', () => {
+      const PG_ON = { ...ON, language: 'postgresql' };
+      expect(formatSql("SELECT {{ var('x', '}}') }} AS x", PG_ON))
+        .toBe("SELECT\n  {{ var('x', '}}') }} AS x");
+      expect(formatSql("SELECT {{ {'a': {'b': 1}} }} AS x", PG_ON))
+        .toBe("SELECT\n  {{ {'a': {'b': 1}} }} AS x");
+    });
+
+    it('keeps the dialect own custom parameters when the option is on', () => {
+      // paramTypes.custom を渡すと方言側の custom 定義が置き換わってしまう。
+      const ch = 'SELECT * FROM t WHERE id = {id:UInt64} AND x = #{x}';
+      expect(formatSql(ch, { ...ON, language: 'clickhouse' })).toBe(
+        'SELECT\n  *\nFROM\n  t\nWHERE\n  id = {id:UInt64}\n  AND x = #{x}'
+      );
+      const lite = 'SELECT * FROM t WHERE id = $name';
+      expect(formatSql(lite, { ...ON, language: 'sqlite' }))
+        .toBe(formatSql(lite, { ...OFF, language: 'sqlite' }));
+    });
+
+    it('keeps the placeholder shapes seen in real MyBatis and dbt files', () => {
+      const sql = 'SELECT #{id,jdbcType=INTEGER}, #{user.name}, #{ id }, {{ a }} || {{ b }} FROM t';
+      expect(formatSql(sql, ON)).toBe(
+        'SELECT\n  #{id,jdbcType=INTEGER},\n  #{user.name},\n  #{ id },\n  {{ a }} || {{ b }}\nFROM\n  t'
+      );
+    });
+
+    it.each([
+      ['a quote', `SELECT a FROM t WHERE (x = {{ var("it's") }} AND y = 2)`,
+        `WHERE (x = {{ var("it's") }} AND y = 2)`],
+      ['--', 'SELECT a FROM t WHERE (x = #{a--b} AND y = 2)', 'WHERE (x = #{a--b} AND y = 2)'],
+      ['/*', 'SELECT a FROM t WHERE (x = ${a/*b} AND y = 2)', 'WHERE (x = ${a/*b} AND y = 2)'],
+      ['a quote next to it', "SELECT a FROM t WHERE (x = '{{ y }}' AND z = 2)",
+        "WHERE (x = '{{ y }}' AND z = 2)"],
+    ])('joins a block around a placeholder holding %s', (_, sql, line) => {
+      // プレースホルダの中の ' や -- を SQL と読むと、以降が文字列やコメント
+      // 扱いになり、この括弧は連結されなくなる。
+      expect(formatSql(sql, { ...ON, compactLists: true }).split('\n')).toContain(line);
+    });
+
+    it.each([false, true])('formats its own output to the same thing (compactLists: %s)', (compactLists) => {
+      const multiLine = 'SELECT a FROM t WHERE (x = {{ f(\n  1\n) }} AND y = 2)';
+      for (const sql of [DBT_SQL, MYBATIS_SQL, multiLine]) {
+        const once = formatSql(sql, { ...ON, compactLists });
+        expect(formatSql(once, { ...ON, compactLists })).toBe(once);
       }
+    });
+
+    it('keeps the lines around a multi-line {{ ... }} in parentheses expanded', () => {
+      const sql = 'SELECT a FROM t WHERE (x = {{ f(\n  1\n) }} AND y = 2)';
+      expect(formatSql(sql, { ...ON, compactLists: true })).toBe(
+        'SELECT a\nFROM t\nWHERE\n  (\n    x = {{ f(\n  1\n) }}\n    AND y = 2\n  )'
+      );
+    });
+
+    it('keeps a multi-line {{ ... }} inside a line comment out of the SQL', () => {
+      const sql = 'SELECT a -- {{ x\n}} y\nFROM t';
+      expect(formatSql(sql, ON)).toBe('SELECT\n  a -- {{ x\n}} y\nFROM\n  t');
     });
 
     it('joins a block holding a MyBatis placeholder in compact mode', () => {
@@ -543,7 +667,7 @@ describe('formatSql', () => {
       const result = formatSql(`SELECT ${literal} AS x, y FROM t`, {
         ...ON, compactLists: true,
       });
-      expect(result).toContain(literal);
+      expect(result).toBe(`SELECT\n  ${literal} AS x,\n  y\nFROM t`);
     });
 
     it('still fails on template syntax when the option is off', () => {
