@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { format } from 'sql-formatter';
 import { formatSql } from './formatter.js';
 import { DIALECTS } from './constants.js';
 
@@ -544,6 +545,139 @@ describe('formatSql', () => {
       expect(result).toContain('QUALIFY');
       expect(result).toContain('OFFSET(0)');
       expect(() => formatSql(sql, opts('postgresql'))).toThrow();
+    });
+  });
+
+  /**
+   * `DIALECTS` is pinned to sql-formatter's `supportedDialects` in
+   * `constants.test.js`, so a version bump that adds a dialect fails there
+   * until the dialect is listed. Nothing makes the same demand of the `SYNTAX`
+   * table in `formatter.js`: a newly listed dialect falls through to
+   * `DEFAULT_SYNTAX` silently. That matters most for line comments, where a
+   * missing prefix fails in the unsafe direction — the comment line is read as
+   * ordinary code, and a join pulls what follows behind the comment marker,
+   * dropping it from the query.
+   *
+   * So each lexical feature is asked of sql-formatter itself rather than
+   * copied from its source: `supports` is a snippet that only survives where
+   * the dialect has the feature, and `check` then asserts `formatSql()` gets
+   * that dialect right. The dialects a feature applies to are therefore
+   * discovered, and a new one is covered the moment it is listed.
+   */
+  describe('SYNTAX keeps up with sql-formatter', () => {
+    const BASE = { keywordCase: 'upper', expressionWidth: 60, compactLists: true };
+    const opts = (language) => ({ ...BASE, language });
+
+    const parses = (sql, language) => {
+      try { format(sql, { language }); return true; } catch { return false; }
+    };
+
+    /**
+     * The select list is short enough to fit on one line, so it is joined —
+     * unless the lexer misreads the `--` inside the literal as a comment and
+     * pushes the rest of the list onto its own lines.
+     */
+    const joinsAcrossLiteral = (literal) => (language) => {
+      const result = formatSql(
+        `SELECT ${literal} AS a, bbbbbbbb, cccccccc FROM t`,
+        opts(language)
+      );
+      expect(result.split('\n')[0], `${language}: did not join the select list`)
+        .toContain('cccccccc');
+    };
+
+    /** The prefix only starts a comment where the unterminated quote survives. */
+    const lineComment = (prefix) => ({
+      name: `the ${prefix} line comment`,
+      supports: (language) => parses(`SELECT 1 ${prefix} 'x\n`, language),
+      check: (language) => {
+        const result = formatSql(`SELECT aaa, ${prefix} c\n bbb FROM t`, opts(language));
+        const lines = result.split('\n');
+        const commentLine = lines.find((l) => l.includes(prefix));
+        expect(commentLine, `${language}: lost the ${prefix} comment:\n${result}`).toBeDefined();
+        expect(
+          lines.slice(lines.indexOf(commentLine) + 1).some((l) => l.trim() === 'bbb'),
+          `${language}: joined across a ${prefix} comment, hiding bbb:\n${result}`
+        ).toBe(true);
+      },
+    });
+
+    const keepsSpanningLines = (name, text) => (language) => {
+      const result = formatSql(`SELECT ${text} AS x, y FROM t`, opts(language));
+      expect(result, `${language}: changed ${name} spanning lines`).toContain(text);
+    };
+
+    const CAPABILITIES = [
+      lineComment('--'),
+      lineComment('#'),
+      lineComment('//'),
+      {
+        name: "backslash escapes in '...'",
+        supports: (language) => parses("SELECT 'a\\'b' FROM t", language),
+        check: joinsAcrossLiteral("'O\\'Brien--x'"),
+      },
+      {
+        name: 'backslash escapes in "..."',
+        supports: (language) => parses('SELECT "a\\"b" FROM t', language),
+        check: joinsAcrossLiteral('"O\\"Brien--x"'),
+      },
+      {
+        name: "backslash escapes in E'...'",
+        supports: (language) => parses("SELECT E'a\\'b' FROM t", language),
+        check: joinsAcrossLiteral("E'O\\'Brien--x'"),
+      },
+      {
+        name: 'dollar-quoted strings',
+        // Only a dollar-quoted string makes the unterminated quote inside legal.
+        supports: (language) => parses("SELECT $$a 'b$$ FROM t", language),
+        check: keepsSpanningLines('a dollar-quoted string', '$$hello\n  world$$'),
+      },
+      {
+        name: 'triple-quoted strings',
+        // Under plain doubling the inner quote would end the string early.
+        supports: (language) => parses("SELECT '''it's''' FROM t", language),
+        check: joinsAcrossLiteral("'''it's'''"),
+      },
+      {
+        name: 'nested block comments',
+        // Without nesting the first */ closes it and `c */` becomes code.
+        supports: (language) => {
+          try { return format('SELECT /* a /* b */ c */ 1', { language }).includes('c */'); }
+          catch { return false; }
+        },
+        check: (language) => {
+          // The apostrophe sits in the comment. Ending the comment at the
+          // first */ leaves it in code, where it opens a string that never
+          // closes and stops the rest of the statement being joined.
+          const comment = "/* a\n  /* b */\n  it's c */";
+          const result = formatSql(
+            `SELECT ${comment} aaa, bbb FROM t WHERE x = 1 AND y = 2`,
+            opts(language)
+          );
+          expect(result, `${language}: changed a nested block comment`).toContain(comment);
+          expect(result, `${language}: lexer lost its place after a nested block comment`)
+            .toContain('WHERE x = 1 AND y = 2');
+        },
+      },
+    ];
+
+    const applies = (cap) => DIALECTS.map((d) => d.value).filter(cap.supports);
+
+    it.each(CAPABILITIES.map((cap) => [cap.name, cap]))(
+      'applies %s to every dialect sql-formatter gives it to',
+      (_name, cap) => {
+        const dialects = applies(cap);
+        // A probe that stopped discriminating would make this test vacuous.
+        expect(dialects.length, `no dialect supports ${cap.name} any more`).toBeGreaterThan(0);
+        for (const language of dialects) cap.check(language);
+      }
+    );
+
+    it('leaves no dialect without a lexical rule it needs', () => {
+      // Every dialect must at least handle `--`; the rest it opts into.
+      const covered = new Set(applies(CAPABILITIES[0]));
+      const missing = DIALECTS.map((d) => d.value).filter((v) => !covered.has(v));
+      expect(missing, 'dialects sql-formatter gives no -- comment').toEqual([]);
     });
   });
 });
