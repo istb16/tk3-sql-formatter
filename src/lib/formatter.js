@@ -23,33 +23,89 @@ import { format } from 'sql-formatter';
  *   operator (PostgreSQL's `#>` / `#>>`) and must not be mistaken for one.
  * - `backslash`: quote characters whose strings take backslash escapes
  *   (`'O\'Brien'`).
- * - `eStrings`: `E'...'` strings take backslash escapes (PostgreSQL).
+ * - `eStrings`: `E'...'` strings take backslash escapes (PostgreSQL, DuckDB).
+ * - `rawPrefixes`: per quote character, the prefixes (case-insensitive) that
+ *   make a `'...'` or `"..."` string raw, so a backslash in it escapes nothing
+ *   (BigQuery `r'\'`, Spark `R'\'`, the hex and bit strings `X'...'` and
+ *   `B'...'` of the MySQL family and standard SQL). Only the dialects that
+ *   otherwise take backslash escapes need them. Triple-quoted strings are not
+ *   affected: sql-formatter honours backslashes in `R'''...'''` too.
+ * - `qStrings`: Oracle's `q'[...]'` (also `N`-prefixed), whose delimiter pair —
+ *   `[]`, `()`, `{}`, `<>`, or any other non-space character used on both
+ *   sides — follows the opening quote, and in which a `'` does not close the
+ *   string. Like sql-formatter, only a q-string that closes on the same line is
+ *   one; otherwise `q` is a plain identifier and the quote opens an ordinary
+ *   string.
+ * - `tripleQuotes`: `'''...'''` and `"""..."""` open a string that commonly
+ *   runs over several lines (BigQuery).
  * - `dollar`: how a dollar-quoted string opens (`$$ ... $$`, `$tag$ ... $tag$`).
+ *   Where a tag is allowed, its shape follows what sql-formatter actually
+ *   accepts: in PostgreSQL and DuckDB a tag cannot start with a digit (`$1` is
+ *   a parameter), in ClickHouse it can, and Snowflake takes no tag at all
+ *   (`$name` is a variable).
+ * - `brackets`: `[...]` is a quoted identifier, with `]]` standing for a
+ *   literal `]` (SQLite, T-SQL).
  * - `nestedBlockComments`: a block comment opened inside a block comment must
  *   be closed before the outer one is.
+ *
+ * The dialects that need none of this (db2, redshift, trino) are left out and
+ * take `DEFAULT_SYNTAX`.
  */
 const HASH_COMMENTS = ['--', '#'];
-const MYSQL_SYNTAX = { lineComments: HASH_COMMENTS, backslash: `'"` };
+const MYSQL_SYNTAX = {
+  lineComments: HASH_COMMENTS,
+  backslash: `'"`,
+  rawPrefixes: { "'": ['B', 'X'] },
+};
+const TAGGED_DOLLAR = /^\$(?:[A-Za-z_\u0080-￿][\w\u0080-￿]*)?\$/;
+/** Both quote characters taking the same raw prefixes. */
+const rawQuotes = (prefixes) => ({ "'": prefixes, '"': prefixes });
 const SYNTAX = {
+  sql: { backslash: "'", rawPrefixes: { "'": ['X'] } },
   mysql: MYSQL_SYNTAX,
   mariadb: MYSQL_SYNTAX,
   tidb: MYSQL_SYNTAX,
   singlestoredb: MYSQL_SYNTAX,
-  bigquery: MYSQL_SYNTAX,
-  n1ql: MYSQL_SYNTAX,
-  clickhouse: { lineComments: HASH_COMMENTS, backslash: `'"`, dollar: /^\$\$/ },
-  snowflake: { lineComments: ['--', '//'], backslash: "'", dollar: /^\$\$/ },
-  postgresql: {
-    eStrings: true,
-    dollar: /^\$(?:[A-Za-z_\u0080-￿][\w\u0080-￿]*)?\$/,
-    nestedBlockComments: true,
+  n1ql: { lineComments: HASH_COMMENTS, backslash: `'"` },
+  bigquery: {
+    lineComments: HASH_COMMENTS,
+    backslash: `'"`,
+    rawPrefixes: rawQuotes(['R', 'B', 'RB', 'BR']),
+    tripleQuotes: true,
   },
-  transactsql: { nestedBlockComments: true },
+  hive: { backslash: `'"` },
+  spark: { backslash: `'"`, rawPrefixes: rawQuotes(['R', 'X']) },
+  plsql: { qStrings: true },
+  clickhouse: { lineComments: HASH_COMMENTS, backslash: `'"`, dollar: /^\$\w*\$/ },
+  snowflake: { lineComments: ['--', '//'], backslash: "'", dollar: /^\$\$/ },
+  postgresql: { eStrings: true, dollar: TAGGED_DOLLAR, nestedBlockComments: true },
+  duckdb: { eStrings: true, dollar: TAGGED_DOLLAR, nestedBlockComments: true },
+  sqlite: { brackets: true },
+  transactsql: { brackets: true, nestedBlockComments: true },
+  db2i: { nestedBlockComments: true },
 };
 const DEFAULT_SYNTAX = { lineComments: ['--'], backslash: '' };
 
+/**
+ * A prefix that stands on its own at the end of `before`: `abr'x'` is not a
+ * raw string, nor `abq'[x]'` a q-string.
+ */
+const prefixRegex = (prefixes) => new RegExp(`(?:^|[^\\w$])(?:${prefixes.join('|')})$`, 'i');
+const Q_PREFIX = prefixRegex(['Q', 'NQ']);
+/**
+ * The rest of an Oracle q-string from its opening quote, following
+ * sql-formatter's own pattern (`.` stops at the end of the line).
+ */
+const Q_STRING = /^'(?:<(?:(?!>').)*?>|\[(?:(?!\]').)*?\]|\((?:(?!\)').)*?\)|\{(?:(?!\}').)*?\}|([^\s<[({])(?:(?!\1').)*?\1)'/u;
+
 function syntaxFor(language) {
-  return { ...DEFAULT_SYNTAX, ...SYNTAX[language] };
+  const syntax = { ...DEFAULT_SYNTAX, ...SYNTAX[language] };
+  if (syntax.rawPrefixes) {
+    syntax.rawPrefix = Object.fromEntries(
+      Object.entries(syntax.rawPrefixes).map(([quote, prefixes]) => [quote, prefixRegex(prefixes)]),
+    );
+  }
+  return syntax;
 }
 
 /**
@@ -216,19 +272,25 @@ function templateParamTypes(language, sentinel) {
   return { custom: [{ regex: `${sentinel}\\d+_*${sentinel}` }, ...own] };
 }
 
-/** Whether the quote at `line[i]` opens a string that takes backslash escapes. */
-function takesBackslash(line, i, syntax) {
+/**
+ * Whether the quote at `line[i]` opens a string that takes backslash escapes.
+ * `triple` is set when it opens a triple-quoted string.
+ */
+function takesBackslash(line, i, syntax, triple) {
   const ch = line[i];
+  const before = line.slice(0, i);
+  if (!triple && syntax.rawPrefix?.[ch]?.test(before)) return false;
   if (syntax.backslash.includes(ch)) return true;
-  return !!syntax.eStrings && ch === "'" && /(^|[^\w$])[eE]$/.test(line.slice(0, i));
+  return !!syntax.eStrings && ch === "'" && /(^|[^\w$])[eE]$/.test(before);
 }
 
 /**
  * Lexes the whole of sql-formatter's output in one pass and reports, per line:
  *
- * - `spans`: the line starts or ends inside a string literal or block comment,
- *   i.e. it belongs to one that runs over several lines. Its line breaks and
- *   indentation are part of the literal's value (or the comment's layout), so
+ * - `spans`: the line starts or ends inside a string literal, quoted identifier
+ *   or block comment, i.e. it belongs to one that runs over several lines. Its
+ *   line breaks and indentation are part of the literal's value (or the
+ *   identifier's name, or the comment's layout), so
  *   such a line must never be joined. `parseTree` still reads its indent like
  *   any other line, which can put it in the tree in a place that does not match
  *   the statement's own structure; that is harmless because `isJoinable`
@@ -246,8 +308,9 @@ function takesBackslash(line, i, syntax) {
  * every line it covers marked as spanning, which keeps them from being joined.
  */
 function lexLines(lines, syntax, templates = []) {
-  // null, or { quote, backslash }, { dollar }, { block: depth },
-  // { template: end, outer } (a placeholder inside the `outer` state)
+  // null, or { quote, backslash, doubled }, { dollar }, { block: depth },
+  // { template: end, outer } (a placeholder inside the `outer` state).
+  // `quote` is the closing delimiter, one character or a triple quote.
   let state = null;
   let offset = 0;
   let next = 0;
@@ -275,8 +338,11 @@ function lexLines(lines, syntax, templates = []) {
           i += templates[next]?.[0] === offset + i + 1 ? 1 : 2;
           continue;
         }
-        // A doubled quote ('it''s') closes and reopens, which ends the same way.
-        if (line[i] === state.quote) state = null;
+        // `]]` inside a bracketed identifier is a literal `]`. A doubled quote
+        // ('it''s') needs no such rule: it closes and reopens, which ends the
+        // same way.
+        if (state.doubled && line.startsWith(state.quote.repeat(2), i)) { i += 2; continue; }
+        if (line.startsWith(state.quote, i)) { i += state.quote.length; state = null; continue; }
         i++;
         continue;
       }
@@ -307,8 +373,21 @@ function lexLines(lines, syntax, templates = []) {
       }
       if (line.startsWith('/*', i)) { state = { block: 1 }; i += 2; continue; }
       const ch = line[i];
+      if (ch === "'" && syntax.qStrings && Q_PREFIX.test(line.slice(0, i))) {
+        const m = Q_STRING.exec(line.slice(i));
+        if (m) { i += m[0].length; continue; }
+      }
       if (ch === "'" || ch === '"' || ch === '`') {
-        state = { quote: ch, backslash: takesBackslash(line, i, syntax) };
+        // A triple quote has to be recognised before the single one, or its
+        // first two quotes read as an empty string.
+        const triple = syntax.tripleQuotes && ch !== '`' && line.startsWith(ch.repeat(3), i);
+        const quote = triple ? ch.repeat(3) : ch;
+        state = { quote, backslash: takesBackslash(line, i, syntax, triple) };
+        i += quote.length;
+        continue;
+      }
+      if (ch === '[' && syntax.brackets) {
+        state = { quote: ']', backslash: false, doubled: true };
         i++;
         continue;
       }

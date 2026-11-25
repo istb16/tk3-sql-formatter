@@ -1,6 +1,6 @@
 <script>
-  import { TRANSLATIONS }           from './lib/i18n.js';
-  import { DIALECTS, SAMPLE_SQL }   from './lib/constants.js';
+  import { TRANSLATIONS, groupLabel, dialectLabel } from './lib/i18n.js';
+  import { DIALECT_GROUPS, normalizeDialect, sampleFor } from './lib/constants.js';
   import { loadSettings, saveSettings } from './lib/settings.js';
   import { formatSql }              from './lib/formatter.js';
   import ToggleSwitch               from './lib/ToggleSwitch.svelte';
@@ -9,7 +9,7 @@
 
   // ── State ─────────────────────────────────────────────────────────────────
   let lang            = $state(saved.lang            ?? 'en');
-  let dialect         = $state(saved.dialect         ?? 'mysql');
+  let dialect         = $state(normalizeDialect(saved.dialect));
   let indentStyle     = $state(saved.indentStyle     ?? 'standard');
   let tabWidth        = $state(saved.tabWidth        ?? 2);
   let useTabs         = $state(saved.useTabs         ?? false);
@@ -116,7 +116,7 @@
   }
 
   function loadSample() {
-    inputSql = SAMPLE_SQL[dialect] ?? SAMPLE_SQL.mysql;
+    inputSql = sampleFor(dialect);
   }
 
   function clearAll() {
@@ -202,14 +202,15 @@
       <!-- Dialect -->
       <section>
         <h2 class="text-xs font-semibold uppercase tracking-widest text-muted mb-2 m-0">{t.dialect}</h2>
-        <div class="flex flex-col gap-1.5">
-          {#each DIALECTS as d}
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input type="radio" name="dialect" value={d.value} bind:group={dialect} />
-              <span class="text-sm text-body">{d.label}</span>
-            </label>
+        <select id="dialect" aria-label={t.dialect} bind:value={dialect} class="w-full bg-surface border border-line-strong rounded px-2 py-1.5 text-sm text-ink focus:border-accent">
+          {#each DIALECT_GROUPS as g}
+            <optgroup label={groupLabel(t, g.key)}>
+              {#each g.dialects as d}
+                <option value={d.value}>{dialectLabel(t, d)}</option>
+              {/each}
+            </optgroup>
           {/each}
-        </div>
+        </select>
       </section>
 
       <hr class="border-line m-0" />
