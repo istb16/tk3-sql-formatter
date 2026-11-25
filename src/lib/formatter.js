@@ -1,117 +1,172 @@
 import { format } from 'sql-formatter';
 
 /**
- * Collapses multi-line (...) blocks onto one line.
- * - Non-subquery blocks (EXTRACT etc.) are always collapsed.
- * - SELECT subqueries are collapsed only when the full resulting line fits
- *   within expressionWidth characters.
- * - CTE blocks (WITH name AS (...)) are always left expanded.
- * - Blocks where any inner line has unbalanced parens (nested unclosed block)
- *   are left expanded.
- * Runs until stable.
+ * Post-processing for sql-formatter's output.
+ *
+ * sql-formatter encodes the block structure of a statement in its indentation,
+ * so the output is parsed back into a tree of lines and each node is rendered
+ * bottom-up: a node collapses onto one line when the joined line fits, and is
+ * left expanded otherwise. Working on the tree (instead of scanning the text
+ * line by line) means inner blocks are always considered, even when the block
+ * around them stays expanded, and a block's opening line, body and closing
+ * line always move together.
  */
-function collapseParenBlocks(sql, expressionWidth) {
-  let prev = '';
-  let result = sql;
-  let limit = 100;
-  while (prev !== result && limit-- > 0) {
-    prev = result;
-    result = result.replace(
-      /\((\n[ \t]+[^\n]+)+\n[ \t]*\)/g,
-      (match, _group, offset, input) => {
-        const lineStart = input.lastIndexOf('\n', offset) + 1;
-        const prefix = input.slice(lineStart, offset);
-        const inner = match.slice(1, match.lastIndexOf('\n'))
-          .split('\n').map(l => l.trim()).filter(Boolean);
 
-        // CTE: WITH name AS (  → always keep expanded
-        if (/\bAS\s*$/i.test(prefix.trimEnd())) return match;
-
-        // Reject if any inner line has unbalanced parens (nested unclosed block)
-        const hasUnclosedParen = inner.some(l => {
-          let depth = 0;
-          for (const ch of l) {
-            if (ch === '(') depth++;
-            else if (ch === ')') depth--;
-          }
-          return depth !== 0;
-        });
-        if (hasUnclosedParen) return match;
-
-        // Non-SELECT: always collapse (EXTRACT, function calls, etc.)
-        if (!inner.some(l => /^SELECT\b/i.test(l))) {
-          return '(' + inner.join(' ') + ')';
-        }
-
-        // SELECT subquery: collapse only if full line fits in expressionWidth
-        const fullLine = prefix + '(' + inner.join(' ') + ')';
-        return fullLine.length <= expressionWidth ? '(' + inner.join(' ') + ')' : match;
-      }
-    );
+/** Scans a line and reports the offset of a `--` comment outside string literals. */
+function lineCommentAt(line) {
+  let quote = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') { quote = ch; continue; }
+    if (ch === '-' && line[i + 1] === '-') return i;
   }
-  return result;
+  return -1;
 }
 
+/** True when a line leaves a string literal open (a literal spanning lines). */
+function hasOpenQuote(line) {
+  let quote = null;
+  for (const ch of line) {
+    if (quote) { if (ch === quote) quote = null; continue; }
+    if (ch === "'" || ch === '"' || ch === '`') quote = ch;
+  }
+  return quote !== null;
+}
+
+/** A line that closes the block opened by the preceding sibling. */
+const CLOSER = /^(\)|END\b)/i;
+/** `... AS (` — the opening line of a CTE. */
+const CTE_OPENER = /\bAS\s*\($/i;
+/** `... FOO(` — an opening paren that belongs to a function call. */
+const FUNCTION_CALL = /[\w"`\]]\($/;
 /**
- * Pulls keyword lines and their indented children onto one line when the
- * children form a comma list, AND/OR chain, or are a single item.
- * Subquery bodies are guarded against collapsing.
+ * Keywords that start a clause of their own, but are also used inside the
+ * argument list of a function — EXTRACT(YEAR FROM d), SUBSTRING(s FROM 1 FOR 2),
+ * CAST(x AS INT), POSITION(a IN b). sql-formatter breaks the line on them, so
+ * those arguments are pulled back together whatever the mode.
  */
-function joinCompactLists(sql) {
-  const lines = sql.split('\n');
-  const out   = [];
-  let i = 0;
+const ARG_KEYWORD = /^(FROM|IN|FOR|AS|USING|ORDER BY|SEPARATOR)\b/i;
 
-  while (i < lines.length) {
-    const cur       = lines[i];
-    const curIndent = cur.search(/\S/);
+/**
+ * Builds a tree of lines from sql-formatter's output.
+ * A node owns the lines indented deeper than itself, plus the closing line that
+ * follows them at its own indent (`)` or `END`).
+ */
+function parseTree(lines) {
+  const root = { indent: -1, children: [], closer: null };
+  const stack = [root];
 
-    if (i + 1 < lines.length) {
-      const nextIndent = lines[i + 1].search(/\S/);
-
-      if (nextIndent > curIndent && nextIndent >= 0) {
-        const group = [];
-        let j = i + 1;
-        while (j < lines.length && lines[j].search(/\S/) === nextIndent) {
-          group.push(lines[j].trim());
-          j++;
-        }
-
-        if (group.length >= 1) {
-          const isCommaList      = group.length === 1 || group.slice(0, -1).every(l => l.endsWith(','));
-          const isAndOrBefore    = group.length > 1 && group.slice(1).every(l => /^(AND|OR)\s/i.test(l));
-          const isAndOrAfter     = group.length > 1 && group.slice(0, -1).every(l => /\s(AND|OR)$/i.test(l));
-          const endsWithSubquery = group.length > 1 && group[group.length - 1] === '(';
-
-          if (!endsWithSubquery && (isCommaList || isAndOrBefore || isAndOrAfter)) {
-            out.push(cur.trimEnd() + ' ' + group.join(' '));
-            i = j;
-            continue;
-          }
-        }
-      }
+  for (const raw of lines) {
+    if (!raw.trim()) {
+      root.children.push({ blank: true, raw });
+      stack.length = 1;
+      continue;
     }
 
-    out.push(cur);
-    i++;
+    const indent = raw.search(/\S/);
+    const text = raw.trim();
+    while (stack.length > 1 && indent <= stack[stack.length - 1].indent) stack.pop();
+
+    const parent = stack[stack.length - 1];
+    const prev = parent.children[parent.children.length - 1];
+    if (prev && !prev.blank && !prev.closer && prev.indent === indent && CLOSER.test(text)) {
+      prev.closer = { raw, text };
+      continue;
+    }
+
+    const node = { indent, raw, text, children: [], closer: null };
+    parent.children.push(node);
+    stack.push(node);
   }
 
-  return out.join('\n');
+  return root;
+}
+
+/** Every line of a subtree, in order. */
+function subtreeLines(node, acc = []) {
+  acc.push(node.text);
+  for (const child of node.children) subtreeLines(child, acc);
+  if (node.closer) acc.push(node.closer.text);
+  return acc;
+}
+
+/** Joins the parts of a node onto one line, keeping `(`, `)` and `,` tight. */
+function joinParts(parts) {
+  let out = '';
+  for (const part of parts) {
+    if (!out) { out = part; continue; }
+    const tight = out.endsWith('(') || /^[),;]/.test(part);
+    out += (tight ? '' : ' ') + part;
+  }
+  return out;
+}
+
+function flatten(node) {
+  const parts = [node.text, ...node.children.map(flatten)];
+  if (node.closer) parts.push(node.closer.text);
+  return joinParts(parts);
 }
 
 /**
- * Formats SQL using sql-formatter, then optionally applies the compact-list
- * post-processing pipeline (collapseParenBlocks → joinCompactLists).
+ * Whether a subtree may be joined onto one line at all.
+ * Line comments would swallow everything after them, a string literal spanning
+ * lines would change the text, and a CTE body is always kept expanded.
+ */
+function isJoinable(node) {
+  for (const line of subtreeLines(node)) {
+    if (lineCommentAt(line) !== -1) return false;
+    if (hasOpenQuote(line)) return false;
+    if (CTE_OPENER.test(line)) return false;
+  }
+  return true;
+}
+
+function hasSelect(node) {
+  return subtreeLines(node).some(line => /\bSELECT\b/i.test(line));
+}
+
+function render(node, out, compact, maxWidth) {
+  if (node.blank) { out.push(node.raw); return; }
+  if (!node.children.length && !node.closer) { out.push(node.raw); return; }
+
+  if (isJoinable(node)) {
+    const indent = node.raw.slice(0, node.indent);
+    const joined = flatten(node);
+    // A function call broken on a keyword that only looks like a clause is put
+    // back together whatever the mode.
+    const brokenOnArgKeyword =
+      FUNCTION_CALL.test(node.text) &&
+      !hasSelect(node) &&
+      node.children.some(child => ARG_KEYWORD.test(child.text));
+    if (brokenOnArgKeyword || (compact && indent.length + joined.length <= maxWidth)) {
+      out.push(indent + joined);
+      return;
+    }
+  }
+
+  out.push(node.raw);
+  for (const child of node.children) render(child, out, compact, maxWidth);
+  if (node.closer) out.push(node.closer.raw);
+}
+
+/**
+ * Formats SQL using sql-formatter, then runs the block-aware post-processing.
+ * With `compactLists` the lines are joined back together as far as
+ * `expressionWidth` allows; without it only function-call arguments are pulled
+ * back onto one line.
  */
 export function formatSql(sql, opts) {
   const { compactLists, ...fmtOpts } = opts;
-  let result = format(sql, {
-    ...fmtOpts,
-    expressionWidth: compactLists ? 9999 : fmtOpts.expressionWidth,
-  });
-  if (compactLists) {
-    result = collapseParenBlocks(result, fmtOpts.expressionWidth ?? 50);
-    result = joinCompactLists(result);
+  const maxWidth = fmtOpts.expressionWidth ?? 50;
+  const result = format(sql, fmtOpts);
+
+  const out = [];
+  for (const node of parseTree(result.split('\n')).children) {
+    render(node, out, !!compactLists, maxWidth);
   }
-  return result;
+  return out.join('\n');
 }

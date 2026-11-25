@@ -33,12 +33,16 @@ Settings persist to `localStorage` under the key `sql-formatter-settings`. Input
 
 ### Formatting pipeline
 
-`doFormat()` in `App.svelte` delegates to `formatSql()` in `src/lib/formatter.js`, which calls `sql-formatter`'s `format()` then optionally applies a two-step post-processing pipeline when **Compact mode** (`compactLists`) is enabled:
+`doFormat()` in `App.svelte` delegates to `formatSql()` in `src/lib/formatter.js`, which calls `sql-formatter`'s `format()` and then post-processes the result.
 
-1. `collapseParenBlocks(sql)` — Collapses multi-line `(...)` blocks that contain no nested parens and no subqueries. Runs in a loop until stable. This fixes `EXTRACT(YEAR FROM date)` being expanded by sql-formatter (which treats `FROM` as a keyword).
-2. `joinCompactLists(sql)` — Pulls keyword lines (SELECT, FROM, WHERE, etc.) and their indented children onto one line when the children form a comma list, AND/OR chain, or are a single item. Guards against collapsing subquery bodies.
+sql-formatter encodes the block structure of a statement in its indentation, so `parseTree()` parses the output back into a tree of lines: a node owns the lines indented deeper than itself, plus the closing line that follows them at its own indent (`)` or `END`). `render()` then walks the tree and decides per node whether to join it onto one line or leave it expanded. Because a node is only ever joined as a whole, a block's opening line, body and closing line always move together, and an inner block is considered even when the block around it stays expanded.
 
-When `compactLists` is on, `expressionWidth` is set to `9999` on the sql-formatter call to suppress its own wrapping before the custom pipeline runs.
+A node is joined when:
+
+- **Compact mode** (`compactLists`) is on and the joined line fits within `expressionWidth` — this is the only thing that decides where a line ends, so no joined line can exceed the width. Long lines that sql-formatter itself could not split are left alone.
+- Or the node is a function call that sql-formatter broke on a keyword that only looks like a clause (`EXTRACT(YEAR FROM d)`, `SUBSTRING(s FROM 1 FOR 2)`, `CAST(x AS INT)`, `POSITION(a IN b)`). These are rejoined in both modes.
+
+A node is never joined when its lines contain a `--` comment (joining would comment out the rest), a string literal spanning lines, or a CTE opener (`name AS (`) — CTE bodies stay expanded whatever the width.
 
 ### i18n
 
