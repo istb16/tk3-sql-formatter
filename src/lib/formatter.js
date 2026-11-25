@@ -47,9 +47,46 @@ const SYNTAX = {
 };
 const DEFAULT_SYNTAX = { lineComments: ['--'], backslash: '' };
 
-function syntaxFor(language) {
-  return { ...DEFAULT_SYNTAX, ...SYNTAX[language] };
+function syntaxFor(language, templates) {
+  return { ...DEFAULT_SYNTAX, ...SYNTAX[language], templates };
 }
+
+/**
+ * The template placeholders `ignoreTemplates` lets through: dbt / Jinja
+ * expressions (`{{ ref('orders') }}`) and MyBatis parameters (`#{id}`,
+ * `${raw}`). Statement blocks such as `{% if %}` are left out on purpose — a
+ * statement carrying one is not valid SQL on its own anyway.
+ *
+ * They are handed to sql-formatter as custom `paramTypes`, so each placeholder
+ * becomes a single parameter token: it comes through with its text untouched
+ * (no case folding, no re-spacing inside) instead of raising a parse error.
+ */
+const TEMPLATE_PARAM_TYPES = {
+  custom: [
+    { regex: String.raw`\{\{[\s\S]*?\}\}` },
+    { regex: String.raw`[#$\u0001]\{[^{}]*\}` },
+  ],
+};
+
+/**
+ * sql-formatter settles where a line comment starts before it looks at the
+ * parameter patterns, and in the MySQL family `#` opens a comment — so `#{id}`
+ * would swallow the rest of the line whatever `paramTypes` says. The `#` is
+ * therefore swapped for a character no dialect gives a meaning to for the
+ * duration of the format call, and put back before the output is read again.
+ */
+const HASH_SENTINEL = '\u0001';
+
+function maskHashParams(sql) {
+  return sql.replace(/#\{/g, `${HASH_SENTINEL}{`);
+}
+
+function unmaskHashParams(sql) {
+  return sql.replaceAll(HASH_SENTINEL, '#');
+}
+
+/** A MyBatis `#{...}` / `${...}` parameter at the start of the given text. */
+const TEMPLATE_PARAM = /^[#$]\{[^{}]*\}/;
 
 /** Whether the quote at `line[i]` opens a string that takes backslash escapes. */
 function takesBackslash(line, i, syntax) {
@@ -75,7 +112,7 @@ function takesBackslash(line, i, syntax) {
  * recognised even though they contain no quote of their own.
  */
 function lexLines(lines, syntax) {
-  // null, or { quote, backslash }, { dollar }, { block: depth }
+  // null, or { quote, backslash }, { dollar }, { block: depth }, { template }
   let state = null;
   return lines.map((line) => {
     const startsInside = state !== null;
@@ -102,6 +139,28 @@ function lexLines(lines, syntax) {
           state.block++;
         } else i++;
         continue;
+      }
+
+      if (state?.template) {
+        const end = line.indexOf('}}', i);
+        if (end === -1) i = line.length;
+        else { i = end + 2; state = null; }
+        continue;
+      }
+
+      // A placeholder is skipped whole, so neither a `#` that opens one nor a
+      // quote or a `--` sitting inside it is taken for SQL. A `{{ ... }}` that
+      // runs over several lines leaves every line it covers marked as spanning,
+      // which keeps them from being joined.
+      if (syntax.templates) {
+        if (line.startsWith('{{', i)) {
+          const end = line.indexOf('}}', i + 2);
+          if (end === -1) { state = { template: true }; i = line.length; continue; }
+          i = end + 2;
+          continue;
+        }
+        const param = TEMPLATE_PARAM.exec(line.slice(i));
+        if (param) { i += param[0].length; continue; }
       }
 
       if (syntax.lineComments.some((p) => line.startsWith(p, i))) { comment = true; break; }
@@ -284,11 +343,15 @@ function render(node, out, opts) {
  * Formats SQL using sql-formatter, then runs the block-aware post-processing.
  * With `compactLists` the lines are joined back together as far as
  * `expressionWidth` allows; without it only function-call arguments are pulled
- * back onto one line.
+ * back onto one line. With `ignoreTemplates` the template placeholders listed
+ * at `TEMPLATE_PARAM_TYPES` are treated as parameters rather than as SQL.
  */
 export function formatSql(sql, opts) {
-  const { compactLists, ...fmtOpts } = opts;
-  const result = format(sql, fmtOpts);
+  const { compactLists, ignoreTemplates, ...fmtOpts } = opts;
+  if (ignoreTemplates) fmtOpts.paramTypes = TEMPLATE_PARAM_TYPES;
+  const result = ignoreTemplates
+    ? unmaskHashParams(format(maskHashParams(sql), fmtOpts))
+    : format(sql, fmtOpts);
 
   const renderOpts = {
     compact: !!compactLists,
@@ -297,7 +360,7 @@ export function formatSql(sql, opts) {
   };
 
   const lines = result.split('\n');
-  const lex = lexLines(lines, syntaxFor(fmtOpts.language));
+  const lex = lexLines(lines, syntaxFor(fmtOpts.language, !!ignoreTemplates));
   const out = [];
   for (const node of parseTree(lines, lex).children) {
     render(node, out, renderOpts);

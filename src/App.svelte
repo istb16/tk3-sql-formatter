@@ -26,6 +26,7 @@
   // Narrow screens only: whether the folded format options are open (not saved)
   let optionsOpen     = $state(false);
   let compactLists    = $state(saved.compactLists    ?? false);
+  let ignoreTemplates = $state(saved.ignoreTemplates ?? false);
   let inputSql        = $state('');
   let outputSql       = $state('');
   let errorMsg        = $state('');
@@ -55,7 +56,7 @@
         inputSql, dialect, indentStyle, tabWidth, useTabs,
         keywordCase, identifierCase, dataTypeCase, functionCase,
         logicalOpNl, expressionWidth, linesBetween,
-        denseOperators, nlBeforeSemi, compactLists,
+        denseOperators, nlBeforeSemi, compactLists, ignoreTemplates,
       ];
       doFormat();
     }
@@ -66,7 +67,7 @@
       lang, dialect, indentStyle, tabWidth, useTabs,
       keywordCase, identifierCase, dataTypeCase, functionCase,
       logicalOpNl, expressionWidth, linesBetween,
-      denseOperators, nlBeforeSemi, autoFormat, compactLists,
+      denseOperators, nlBeforeSemi, autoFormat, compactLists, ignoreTemplates,
     });
   });
 
@@ -95,6 +96,7 @@
         denseOperators,
         newlineBeforeSemicolon: nlBeforeSemi,
         compactLists,
+        ignoreTemplates,
       });
       errorMsg = '';
     } catch (e) {
@@ -307,9 +309,14 @@
           <span class="text-sm text-body">{t.nlBeforeSemi}</span>
         </label>
 
-        <label class="flex items-center gap-2 cursor-pointer">
+        <label class="flex items-center gap-2 cursor-pointer mb-2">
           <input type="checkbox" bind:checked={compactLists} />
           <span class="text-sm text-body">{t.compactLists}</span>
+        </label>
+
+        <label class="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" bind:checked={ignoreTemplates} />
+          <span class="text-sm text-body">{t.ignoreTemplates}</span>
         </label>
       </section>
 

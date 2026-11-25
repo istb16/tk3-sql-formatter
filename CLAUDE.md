@@ -48,6 +48,12 @@ A node is never joined when its lines contain a line comment, a line that belong
 
 The line-comment prefixes are per dialect, following sql-formatter's `lineCommentTypes` (the `SYNTAX` table in `formatter.js`): `--` everywhere, `#` in `mysql`, `mariadb`, `tidb`, `singlestoredb`, `bigquery`, `clickhouse`, `n1ql`, and `//` in `snowflake`. `#` must not be treated as a comment elsewhere because PostgreSQL uses `#>` and `#>>` as JSON operators.
 
+### Template placeholders
+
+With the `ignoreTemplates` option (the "Ignore template syntax" toggle), SQL carrying dbt / Jinja expressions (`{{ ref('orders') }}`) or MyBatis parameters (`#{id}`, `${raw}`) is formatted instead of failing to parse. `formatSql()` passes `TEMPLATE_PARAM_TYPES` as sql-formatter's `paramTypes`, so each placeholder becomes one parameter token and its text comes through untouched — no case folding and no re-spacing inside. Statement blocks such as `{% if %}` are out of scope: a statement carrying one is not valid SQL on its own.
+
+sql-formatter settles where a line comment starts before it looks at `paramTypes`, so in the MySQL family (where `#` opens a comment) `#{id}` would swallow the rest of the line whatever `paramTypes` says. The `#` of `#{` is therefore swapped for `HASH_SENTINEL` (`\u0001`, which no dialect gives a meaning to) for the duration of the `format()` call and put back before the output is read again. `lexLines()` skips a whole placeholder when the option is on, so neither a `#` that opens one nor a quote or `--` sitting inside it is taken for SQL; a `{{ ... }}` that runs over several lines marks the lines it covers as spanning, which keeps them from being joined.
+
 ### i18n
 
 Translations live in `src/lib/i18n.js` as the `TRANSLATIONS` constant. The derived value `t = $derived(TRANSLATIONS[lang])` gives the active translation object. All UI strings go through `t`. Adding a new UI string requires entries in both `ja` and `en` objects.

@@ -445,4 +445,99 @@ describe('formatSql', () => {
       expect(lines.slice(lines.indexOf(commentLine) + 1).some((l) => l.trim() === 'b')).toBe(true);
     });
   });
+
+  // ── テンプレート構文 ──────────────────────────────────────────────────────
+  // dbt / Jinja の {{ ... }} と MyBatis の #{...} / ${...} は、ignoreTemplates
+  // が ON のときだけプレースホルダとして通す。中身は一字も変えないこと。
+  describe('template placeholders (ignoreTemplates)', () => {
+    const DBT_SQL =
+      `SELECT a, b FROM {{ ref('orders') }} o WHERE o.d > '{{ var("start") }}' AND o.x = 1`;
+    const MYBATIS_SQL =
+      'SELECT * FROM t WHERE id = #{id} AND name LIKE #{name} AND k = ${raw}';
+    const ON = { language: 'mysql', compactLists: false, keywordCase: 'upper', ignoreTemplates: true };
+    const OFF = { ...ON, ignoreTemplates: false };
+
+    it('formats dbt / Jinja SQL and keeps the placeholders as written', () => {
+      const result = formatSql(DBT_SQL, ON);
+      expect(result).toContain("{{ ref('orders') }}");
+      expect(result).toContain('\'{{ var("start") }}\'');
+      expect(result.split('\n').length).toBeGreaterThan(1);
+      expect(result.replace(/\s+/g, ' ').trim()).toBe(
+        `SELECT a, b FROM {{ ref('orders') }} o WHERE o.d > '{{ var("start") }}' AND o.x = 1`
+      );
+    });
+
+    it('formats MyBatis SQL and keeps the placeholders as written', () => {
+      const result = formatSql(MYBATIS_SQL, ON);
+      expect(result).toContain('#{id}');
+      expect(result).toContain('#{name}');
+      expect(result).toContain('${raw}');
+      expect(result.replace(/\s+/g, ' ').trim()).toBe(
+        'SELECT * FROM t WHERE id = #{id} AND name LIKE #{name} AND k = ${raw}'
+      );
+    });
+
+    it('breaks a MyBatis statement onto several lines instead of reading #{ as a comment', () => {
+      // MySQL 系では # が行コメントなので、手当てがないと #{id} 以降が丸ごと
+      // コメント扱いになり、1 行のまま整形されない。
+      const lines = formatSql(MYBATIS_SQL, ON).split('\n');
+      expect(lines.filter((l) => /^\s*AND\b/.test(l))).toHaveLength(2);
+    });
+
+    it.each(['mysql', 'postgresql', 'snowflake', 'plsql', 'transactsql'])(
+      'keeps MyBatis placeholders intact in dialect %s',
+      (language) => {
+        const result = formatSql(MYBATIS_SQL, { ...ON, language });
+        expect(result).toContain('#{id}');
+        expect(result).toContain('#{name}');
+        expect(result).toContain('${raw}');
+      }
+    );
+
+    it('does not fold the case of a placeholder body', () => {
+      const result = formatSql(MYBATIS_SQL, {
+        ...ON, identifierCase: 'upper', functionCase: 'upper',
+      });
+      expect(result).toContain('#{id}');
+      expect(result).toContain('#{name}');
+      expect(result).toContain('${raw}');
+    });
+
+    it('leaves the sentinel character out of the result', () => {
+      expect(formatSql(MYBATIS_SQL, ON)).not.toContain('\u0001');
+    });
+
+    it('formats its own output to the same thing', () => {
+      for (const sql of [DBT_SQL, MYBATIS_SQL]) {
+        const once = formatSql(sql, ON);
+        expect(formatSql(once, ON)).toBe(once);
+      }
+    });
+
+    it('joins a block holding a MyBatis placeholder in compact mode', () => {
+      // #{p} をコメントの始まりと誤認すると、この括弧は展開されたままになる。
+      const result = formatSql('SELECT a FROM t WHERE (x = #{p} AND y = 2)', {
+        ...ON, compactLists: true,
+      });
+      expect(result.split('\n')).toContain('WHERE (x = #{p} AND y = 2)');
+    });
+
+    it('keeps a {{ ... }} spanning lines as written', () => {
+      const literal = '{{ config(\n  materialized = "table"\n) }}';
+      const result = formatSql(`SELECT ${literal} AS x, y FROM t`, {
+        ...ON, compactLists: true,
+      });
+      expect(result).toContain(literal);
+    });
+
+    it('still fails on template syntax when the option is off', () => {
+      expect(() => formatSql(DBT_SQL, OFF)).toThrow();
+      expect(() => formatSql(MYBATIS_SQL, { ...OFF, language: 'postgresql' })).toThrow();
+    });
+
+    it('does not change plain SQL when the option is on', () => {
+      const sql = 'SELECT id, name FROM users WHERE id = 1';
+      expect(formatSql(sql, ON)).toBe(formatSql(sql, OFF));
+    });
+  });
 });
