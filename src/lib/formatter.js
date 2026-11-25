@@ -112,27 +112,62 @@ function freeSentinel(sql) {
 }
 
 /**
+ * Identifier characters glued to a placeholder (`log_${month}`,
+ * `{{ prefix }}orders`). They are masked together with it, since sql-formatter
+ * would otherwise read the name as two tokens and put a space between them. A
+ * `$` that opens the next `${...}` is not one of them.
+ */
+const WORD_CHAR = /[\p{L}\p{N}_$]/u;
+const WORD_AFTER = /(?:[\p{L}\p{N}_]|\$(?!\{))*/uy;
+
+/** Where the identifier characters running up to `end` start, not before `from`. */
+function wordStart(sql, from, end) {
+  let i = end;
+  while (i > from && WORD_CHAR.test(sql[i - 1])) i--;
+  return i;
+}
+
+/**
  * Swaps every placeholder for `<sentinel><index>___<sentinel>`, padded with `_`
  * to the length of the text it replaces so that sql-formatter's own decisions
- * on what fits within `expressionWidth` are the same as for the real text.
+ * on what fits within `expressionWidth` are the same as for the real text. A
+ * placeholder is masked together with the identifier characters and any other
+ * placeholders glued to it, so the whole name is one token.
  * Returns null when no sentinel is free (the SQL is then formatted as it is).
  */
 function maskTemplates(sql) {
   const sentinel = freeSentinel(sql);
   if (!sentinel) return null;
+  // [start, end) of each run of glued placeholders and identifier characters.
+  const runs = [];
+  // Once a `{{` has no `}}` anywhere after it, no later `{{` has one either,
+  // so the rest of the input is not scanned again for each of them.
+  let jinjaClosed = true;
+  TEMPLATE_START.lastIndex = 0;
+  for (let m; (m = TEMPLATE_START.exec(sql)); ) {
+    let end;
+    if (m[0] !== '{{') end = m.index + m[0].length;
+    else if (jinjaClosed) end = jinjaEnd(sql, m.index);
+    else end = -1;
+    if (end === -1) { jinjaClosed = false; continue; }
+    WORD_AFTER.lastIndex = end;
+    end += WORD_AFTER.exec(sql)[0].length;
+    const prev = runs[runs.length - 1];
+    if (prev && prev[1] === m.index) prev[1] = end;
+    else runs.push([wordStart(sql, prev ? prev[1] : 0, m.index), end]);
+    TEMPLATE_START.lastIndex = end;
+  }
+
   const originals = [];
   let masked = '';
   let last = 0;
-  TEMPLATE_START.lastIndex = 0;
-  for (let m; (m = TEMPLATE_START.exec(sql)); ) {
-    const end = m[0] === '{{' ? jinjaEnd(sql, m.index) : m.index + m[0].length;
-    if (end === -1) continue;
-    const text = sql.slice(m.index, end);
+  for (const [start, end] of runs) {
+    const text = sql.slice(start, end);
     const id = String(originals.length);
-    masked += sql.slice(last, m.index) + sentinel + id +
+    masked += sql.slice(last, start) + sentinel + id +
       '_'.repeat(Math.max(0, text.length - id.length - 2)) + sentinel;
     originals.push(text);
-    last = TEMPLATE_START.lastIndex = end;
+    last = end;
   }
   masked += sql.slice(last);
   return { sql: masked, sentinel, originals };
@@ -220,7 +255,12 @@ function lexLines(lines, syntax, templates = []) {
       }
 
       if (state?.quote) {
-        if (state.backslash && line[i] === '\\') { i += 2; continue; }
+        // The escaped character is skipped, unless a placeholder starts on it
+        // ('C:\{{ dir }}'): the next pass then picks the placeholder up.
+        if (state.backslash && line[i] === '\\') {
+          i += templates[next]?.[0] === offset + i + 1 ? 1 : 2;
+          continue;
+        }
         // A doubled quote ('it''s') closes and reopens, which ends the same way.
         if (line[i] === state.quote) state = null;
         i++;

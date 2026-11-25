@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { formatSql } from './formatter.js';
 
 const MYSQL = { language: 'mysql', compactLists: false };
@@ -561,6 +561,25 @@ describe('formatSql', () => {
       }
     );
 
+    it('picks another sentinel when the SQL already holds U+E000', () => {
+      // 番兵は SQL に含まれない最初の私用領域の文字。U+E000 を番兵にすると、
+      // マスクに見える文字列リテラルまで #{id} に戻されてしまう。
+      expect(formatSql("SELECT '', #{id}", ON)).toBe("SELECT\n  '',\n  #{id}");
+      expect(formatSql("SELECT '0_', #{id}", ON))
+        .toBe("SELECT\n  '0_',\n  #{id}");
+    });
+
+    it('formats the SQL unmasked when every Private Use Area character is taken', () => {
+      let all = '';
+      for (let c = 0xe000; c <= 0xf8ff; c++) all += String.fromCharCode(c);
+      // マスクに見える '0_' も、マスクしない以上そのまま残る。
+      const sql = `SELECT '${all}', '0_' FROM t WHERE a = 1 #{id}`;
+      const result = formatSql(sql, ON);
+      expect(result).toBe(formatSql(sql, OFF));
+      expect(result).toContain(`'${all}'`);
+      expect(result).toContain("'0_'");
+    });
+
     it('leaves a MySQL # comment that never closes its brace alone', () => {
       // #{ を必ずマスクすると、閉じない #{ を持つ行コメントが構文エラーになる。
       const sql = 'SELECT a FROM t #{unclosed note';
@@ -601,6 +620,77 @@ describe('formatSql', () => {
         .toBe("SELECT\n  {{ var('x', '}}') }} AS x");
       expect(formatSql("SELECT {{ {'a': {'b': 1}} }} AS x", PG_ON))
         .toBe("SELECT\n  {{ {'a': {'b': 1}} }} AS x");
+    });
+
+    it('does not end a {{ ... }} at a }} after a backslash-escaped quote', () => {
+      expect(formatSql('SELECT {{ var("a\\"}}") }} AS x', ON))
+        .toBe('SELECT\n  {{ var("a\\"}}") }} AS x');
+    });
+
+    it('ends a {{ ... }} that never balances at its first }}', () => {
+      // 閉じないアポストロフィや括弧があっても、最初の }} で区切って次の
+      // プレースホルダは別に扱う。
+      expect(formatSql("SELECT {{ don't }} AS x, {{ y }} AS z", ON))
+        .toBe("SELECT\n  {{ don't }} AS x,\n  {{ y }} AS z");
+      expect(formatSql('SELECT {{ f( }} FROM t', ON)).toBe('SELECT\n  {{ f( }}\nFROM\n  t');
+    });
+
+    it('leaves a {{ with no }} anywhere as SQL', () => {
+      // マスクされないので、オプション OFF と同じく SQL として解析される。
+      expect(() => formatSql('SELECT {{ a', ON)).toThrow(/Parse error/);
+      expect(formatSql("SELECT '{{ a' AS x", ON)).toBe("SELECT\n  '{{ a' AS x");
+    });
+
+    it('does not rescan the rest of the input for every {{ that never closes', () => {
+      // }} が後ろに一つもない {{ が続いても、残りを毎回走査し直さない
+      // （以前は 64 KB で約 6 秒かかっていた）。時間ではなく走査回数で確かめる。
+      const sql = "SELECT '" + '{{'.repeat(2000) + "'";
+      const indexOf = vi.spyOn(String.prototype, 'indexOf');
+      let result;
+      try {
+        result = formatSql(sql, ON);
+        expect(indexOf.mock.calls.filter(([s]) => s === '}}').length).toBeLessThanOrEqual(1);
+      } finally {
+        indexOf.mockRestore();
+      }
+      expect(result).toBe("SELECT\n  '" + '{{'.repeat(2000) + "'");
+    });
+
+    it.each([
+      ['FROM log_${month}', 'SELECT a FROM log_${month} WHERE id = 1',
+        'SELECT\n  a\nFROM\n  log_${month}\nWHERE\n  id = 1'],
+      ['{{ prefix }}orders', 'SELECT a FROM {{ prefix }}orders WHERE id = 1',
+        'SELECT\n  a\nFROM\n  {{ prefix }}orders\nWHERE\n  id = 1'],
+      ["stg_{{ var('src') }}", "SELECT a FROM stg_{{ var('src') }} WHERE id=1",
+        "SELECT\n  a\nFROM\n  stg_{{ var('src') }}\nWHERE\n  id = 1"],
+      ['col_${n}', 'SELECT col_${n} FROM t', 'SELECT\n  col_${n}\nFROM\n  t'],
+      ['pre_#{id}', 'SELECT a FROM t WHERE k = pre_#{id}',
+        'SELECT\n  a\nFROM\n  t\nWHERE\n  k = pre_#{id}'],
+      ['テーブル_${n}', 'SELECT a FROM テーブル_${n}', 'SELECT\n  a\nFROM\n  テーブル_${n}'],
+    ])('does not split a name glued to a placeholder (%s)', (_, sql, expected) => {
+      // 識別子にくっついたプレースホルダを別トークンにすると、間に空白が入り
+      // テンプレート展開後の SQL が壊れる。
+      expect(formatSql(sql, ON)).toBe(expected);
+    });
+
+    it('keeps placeholders glued to their neighbours', () => {
+      expect(formatSql(
+        "SELECT * FROM {{ schema }}.orders WHERE a LIKE '%${kw}%' AND b = #{id}::int",
+        { ...ON, language: 'postgresql' },
+      )).toBe("SELECT\n  *\nFROM\n  {{ schema }}.orders\nWHERE\n  a LIKE '%${kw}%'\n  AND b = #{id}::int");
+      expect(formatSql(
+        "SELECT {{ ref('a') }}::int, #{id}_suffix, {{ a }}{{ b }}, x_${a}${b}_y FROM t",
+        { ...ON, language: 'postgresql' },
+      )).toBe("SELECT\n  {{ ref('a') }}::int,\n  #{id}_suffix,\n  {{ a }}{{ b }},\n  x_${a}${b}_y\nFROM\n  t");
+    });
+
+    it('restores 10 or more placeholders, including ones shorter than their mask', () => {
+      // 11 番目以降はマスクの番号が 2 桁になり、#{} はマスクより短い。
+      const params = [...Array.from({ length: 11 }, (_, i) => `#{p${i}}`), '#{}', '{{}}'];
+      const sql = `INSERT INTO t VALUES (${params.join(', ')})`;
+      const result = formatSql(sql, ON);
+      expect(result.match(/#\{[^}]*\}|\{\{\}\}/g)).toEqual(params);
+      expect(result).not.toMatch(/[-]/);
     });
 
     it('keeps the dialect own custom parameters when the option is on', () => {
@@ -646,6 +736,32 @@ describe('formatSql', () => {
       const sql = 'SELECT a FROM t WHERE (x = {{ f(\n  1\n) }} AND y = 2)';
       expect(formatSql(sql, { ...ON, compactLists: true })).toBe(
         'SELECT a\nFROM t\nWHERE\n  (\n    x = {{ f(\n  1\n) }}\n    AND y = 2\n  )'
+      );
+    });
+
+    it('sees a placeholder that starts on a backslash-escaped character', () => {
+      // MySQL の '...' はバックスラッシュエスケープを取る。\ の次の文字を読み
+      // 飛ばすと {{ の始まりを見落とし、中の ' で文字列が閉じたと誤認して
+      // 括弧が連結されなくなる。
+      const sql = `SELECT a FROM t WHERE (x = 'C:\\{{ v("it's") }}' AND y = 2)`;
+      expect(formatSql(sql, { ...ON, compactLists: true })).toBe(
+        `SELECT a\nFROM t\nWHERE (x = 'C:\\{{ v("it's") }}' AND y = 2)`
+      );
+    });
+
+    it('keeps a multi-line {{ ... }} inside a string literal from being joined', () => {
+      // 文字列の中で複数行にわたるプレースホルダの後も、文字列の外に戻って
+      // 以降の括弧は連結される。
+      const sql = "SELECT '{{ f(\n 1\n) }}' AS a, b FROM t WHERE (x = 1 AND y = 2)";
+      expect(formatSql(sql, { ...ON, compactLists: true })).toBe(
+        "SELECT\n  '{{ f(\n 1\n) }}' AS a,\n  b\nFROM t\nWHERE (x = 1 AND y = 2)"
+      );
+    });
+
+    it('reads a placeholder sharing a line with the end of a multi-line one', () => {
+      const sql = 'SELECT a FROM t WHERE (x = {{ f(\n 1\n) }} || {{ g }} AND y = 2) AND (p = 1 AND q = 2)';
+      expect(formatSql(sql, { ...ON, compactLists: true })).toBe(
+        'SELECT a\nFROM t\nWHERE\n  (\n    x = {{ f(\n 1\n) }} || {{ g }}\n    AND y = 2\n  )\n  AND (p = 1 AND q = 2)'
       );
     });
 
