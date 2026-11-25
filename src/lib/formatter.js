@@ -76,15 +76,30 @@ function syntaxFor(language) {
 const TEMPLATE_START = /\{\{|[#$]\{[^{}\n]*\}/g;
 
 /**
+ * How far past the first `}}` the search for one at depth 0 keeps going. The
+ * depth tracking is there for `{{ {'a': {'b': 1}} }}`, where the real close sits
+ * a few characters further on; an expression that never balances (`{{ f( }}`)
+ * would otherwise have the whole rest of the input scanned, once per opener.
+ * An expression whose close is further than this past its first `}}` ends at
+ * that first `}}` instead.
+ */
+const JINJA_LOOKAHEAD = 1024;
+
+/**
  * Where the Jinja expression opened by the `{{` at `start` ends (the index just
  * past its `}}`), or -1 when it never closes. A `}}` inside a quoted string or
  * inside brackets (`{{ var('x', '}}') }}`, `{{ {'a': {'b': 1}} }}`) does not
  * close it. An expression that never balances falls back to its first `}}`.
  */
 function jinjaEnd(sql, start) {
+  // The first `}}` anywhere after the opener, quoted or not. With none, the
+  // expression never closes and is left as SQL, and there is nothing to scan.
+  const fallback = sql.indexOf('}}', start + 2);
+  if (fallback === -1) return -1;
+  const limit = Math.min(sql.length, fallback + JINJA_LOOKAHEAD);
   let depth = 0;
   let quote = null;
-  for (let i = start + 2; i < sql.length; i++) {
+  for (let i = start + 2; i < limit; i++) {
     const ch = sql[i];
     if (quote) {
       if (ch === '\\') i++;
@@ -94,8 +109,7 @@ function jinjaEnd(sql, start) {
     else if (depth > 0 && ')]}'.includes(ch)) depth--;
     else if (depth === 0 && sql.startsWith('}}', i)) return i + 2;
   }
-  const end = sql.indexOf('}}', start + 2);
-  return end === -1 ? -1 : end + 2;
+  return fallback + 2;
 }
 
 /**

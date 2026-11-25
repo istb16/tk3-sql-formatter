@@ -656,6 +656,31 @@ describe('formatSql', () => {
       expect(result).toBe("SELECT\n  '" + '{{'.repeat(2000) + "'");
     });
 
+    it('does not rescan the rest of the input for every {{ that never balances', () => {
+      // {{ f( }} のように }} はあるが括弧が閉じない式が続く場合も、フォール
+      // バックの前に残り全体を走査しない（以前は 40 KB で約 0.9 秒かかった）。
+      // 機械の速さに左右されないよう、絶対値ではなく入力 8 倍に対する比で
+      // 確かめる。線形なら 3 倍程度、二次なら 60 倍以上になる。
+      const run = (n) => {
+        const sql = 'SELECT ' + Array.from({ length: n }, () => '{{ f( }}').join(', ');
+        const t0 = performance.now();
+        formatSql(sql, ON);
+        return performance.now() - t0;
+      };
+      run(1000); // JIT を暖めてから測る
+      const small = run(1000);
+      const large = run(8000);
+      expect(large / small).toBeLessThan(10);
+    }, 60000);
+
+    it('ends a {{ ... }} whose close is far past its first }} at that first }}', () => {
+      // 深さを追う走査は JINJA_LOOKAHEAD 文字で打ち切る。実在する式はこの幅に
+      // 収まるが、超えたものは最初の }} で区切られ、残りは SQL として扱う。
+      expect(formatSql("SELECT {{ {'a': 1}} }} AS x", ON)).toBe("SELECT\n  {{ {'a': 1}} }} AS x");
+      const far = `SELECT {{ {'a': 1}}${' '.repeat(1100)} }} AS x`;
+      expect(() => formatSql(far, ON)).toThrow(/Parse error/);
+    });
+
     it.each([
       ['FROM log_${month}', 'SELECT a FROM log_${month} WHERE id = 1',
         'SELECT\n  a\nFROM\n  log_${month}\nWHERE\n  id = 1'],
